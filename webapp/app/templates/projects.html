@@ -1,33 +1,47 @@
 {% extends "base.html" %}
 {% block title %}Проекты{% endblock %}
 {% block content %}
+<div class="eyebrow">Рабочее пространство</div>
 <h1>Проекты</h1>
-<p class="muted">Объект — это дом. Внутри переключаются этажи, на каждый грузится свой PDF.</p>
+<p class="lede">Объект — это дом. Внутри переключаются этажи, на каждый загружается свой PDF плана.</p>
 
-<div class="card" style="margin:16px 0">
-  <form method="post" action="/projects" class="row" style="align-items:flex-end">
-    <div style="flex:2 1 240px">
+<div class="new-project-card">
+  <form method="post" action="/projects" class="row">
+    <div class="field-grow">
       <label>Название объекта</label>
-      <input type="text" name="name" placeholder="Еллада" required>
+      <input type="text" name="name" placeholder="Эллада-7" required>
     </div>
-    <div style="flex:0 1 160px">
+    <div style="flex:0 1 140px">
       <label>Этажей</label>
       <input type="number" name="floors" min="1" max="200" value="12" required>
     </div>
-    <button class="primary" type="submit">Создать проект</button>
+    <button class="primary" type="submit">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      Создать проект
+    </button>
   </form>
 </div>
 
 {% if projects %}
 <div class="grid">
   {% for p in projects %}
-  <a class="card tile" href="/projects/{{ p['id'] }}">
+  <a class="tile" href="/projects/{{ p['id'] }}">
     <h3>{{ p["name"] }}</h3>
-    <div class="muted">{{ p["floors"] }} эт. · готово этажей: {{ p["ready"] }} · квартир: {{ p["flats"] }}</div>
+    <div class="tile-stats">
+      <div class="stat"><b>{{ p["floors"] }}</b><span>этажей</span></div>
+      <div class="stat"><b>{{ p["ready"] }}</b><span>готово</span></div>
+      <div class="stat"><b>{{ p["flats"] }}</b><span>квартир</span></div>
+    </div>
+    <div class="progress-track">
+      <div class="progress-fill" style="width:{{ (p['ready'] / p['floors'] * 100) if p['floors'] else 0 }}%"></div>
+    </div>
   </a>
   {% endfor %}
 </div>
 {% else %}
-<p class="notice">Проектов пока нет.</p>
+<div class="empty-state">
+  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/></svg>
+  <div>Проектов пока нет — создайте первый выше.</div>
+</div>
 {% endif %}
 {% endblock %}

@@ -2,8 +2,16 @@
 {% block title %}Ошибка {{ code }}{% endblock %}
 {% block content %}
 <div class="card narrow">
-  <h1>Ошибка {{ code }}</h1>
-  <p>{{ detail }}</p>
-  <a class="btn" href="/projects">К проектам</a>
+  <div class="auth-mark">
+    <svg width="46" height="46" viewBox="0 0 24 24" fill="none">
+      <circle cx="12" cy="12" r="11" fill="var(--err-soft)"/>
+      <path d="M12 7v6M12 16.5v.01" stroke="var(--err)" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  </div>
+  <h1 style="text-align:center">Ошибка {{ code }}</h1>
+  <p class="lede">{{ detail }}</p>
+  <div class="row" style="justify-content:center; margin-top:20px">
+    <a class="btn primary" href="/projects">К проектам</a>
+  </div>
 </div>
 {% endblock %}

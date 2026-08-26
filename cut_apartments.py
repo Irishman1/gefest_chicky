@@ -280,22 +280,30 @@ def vector_apartments(page, labels, args):
     for a in bodies:
         a.rect = union_rect(a.paths)
 
-    orphans = 0                              # балкони/лоджії -> до своєї квартири
-    for path in unassigned:
-        r = path["rect"]
-        best, best_score = None, None
-        for a in bodies:
-            gap = rect_gap(r, a.rect)
-            ovl = rect_overlap_area(r, a.rect)
-            if ovl <= 0 and gap > args.attach_gap:
-                continue
-            score = (ovl, contact_length(r, a.rect), -gap)
-            if best_score is None or score > best_score:
-                best, best_score = a, score
-        if best is not None:
-            best.paths.append(path)
-        else:
-            orphans += 1
+    # Балкони/лоджії -> до своєї квартири. Приєднуємо глобально найближчий
+    # шматок на кожному кроці й одразу перераховуємо межі квартири, перш ніж
+    # шукати наступний: інакше відстань міряють від початкового крихітного
+    # фрагмента, а не від фактичної форми квартири, і далекий шматок може
+    # "проскочити" лише тому, що випадково опинився поруч з якимось іншим
+    # уже приєднаним фрагментом.
+    remaining = list(unassigned)
+    while remaining:
+        best_i, best_a, best_score = None, None, None
+        for i, path in enumerate(remaining):
+            r = path["rect"]
+            for a in bodies:
+                gap = rect_gap(r, a.rect)
+                ovl = rect_overlap_area(r, a.rect)
+                if ovl <= 0 and gap > args.attach_gap:
+                    continue
+                score = (ovl, contact_length(r, a.rect), -gap)
+                if best_score is None or score > best_score:
+                    best_i, best_a, best_score = i, a, score
+        if best_a is None:
+            break
+        best_a.paths.append(remaining.pop(best_i))
+        best_a.rect = union_rect(best_a.paths)
+    orphans = len(remaining)
 
     for a in bodies:
         a.rect = union_rect(a.paths)

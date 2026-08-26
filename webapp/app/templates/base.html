@@ -4,6 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Нарезка планировок{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
   <script>
     (function () {
@@ -17,14 +20,27 @@
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="/projects">Нарезка планировок</a>
+  <a class="brand" href="/projects">
+    <svg class="brand-mark" width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="1" y="1" width="24" height="24" rx="6" fill="var(--accent)"/>
+      <path d="M6 18.5V8.5C6 7.67157 6.67157 7 7.5 7H14.5L20 12.5V18.5C20 19.3284 19.3284 20 18.5 20H7.5C6.67157 20 6 19.3284 6 18.5Z" stroke="var(--accent-ink)" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M14.5 7V11.5C14.5 12.0523 14.9477 12.5 15.5 12.5H20" stroke="var(--accent-ink)" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M9 15H14" stroke="var(--accent-ink)" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    <span class="brand-word">Контур<span class="brand-word-accent">Плана</span></span>
+  </a>
   <nav>
     {% if user %}
-      <span class="muted">{{ user["username"] }}</span>
-      {% if user["is_admin"] %}<a href="/admin">Админка</a>{% endif %}
-      <a href="/logout">Выйти</a>
+      {% if user["is_admin"] %}<a class="nav-link" href="/admin">Админка</a>{% endif %}
+      <div class="user-chip">
+        <span class="user-dot"></span>{{ user["username"] }}
+      </div>
+      <a class="nav-link" href="/logout">Выйти</a>
     {% endif %}
-    <button class="theme" id="theme-toggle" type="button" title="Светлая / тёмная тема">◐</button>
+    <button class="theme-toggle" id="theme-toggle" type="button" title="Светлая / тёмная тема" aria-label="Переключить тему">
+      <svg class="icon-sun" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v2.5M12 19v2.5M4.2 4.2l1.8 1.8M18 18l1.8 1.8M2.5 12H5M19 12h2.5M4.2 19.8L6 18M18 6l1.8-1.8"/></svg>
+      <svg class="icon-moon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5Z"/></svg>
+    </button>
   </nav>
 </header>
 

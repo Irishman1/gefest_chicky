@@ -2,17 +2,21 @@
 {% block title %}{{ project["name"] }}{% endblock %}
 {% block content %}
 
-<div class="row">
+<div class="project-head row">
   <div>
+    <div class="eyebrow">Объект</div>
     <h1>{{ project["name"] }}</h1>
-    <div class="muted">{{ project["floors"] }} этажей · файлы называются
+    <div class="lede">{{ project["floors"] }} этажей &middot; файлы называются
       <code>{{ project["name"] }}_{{ floor["number"] }}_2.png</code></div>
   </div>
   <span class="spacer"></span>
-  <a class="btn" href="/download/project/{{ project['id'] }}">Скачать весь объект</a>
+  <a class="btn" href="/download/project/{{ project['id'] }}">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0-4-4m4 4 4-4M4 21h16"/></svg>
+    Скачать весь объект
+  </a>
   <form method="post" action="/projects/{{ project['id'] }}/delete"
         onsubmit="return confirm('Удалить проект вместе со всеми этажами и файлами?')">
-    <button class="danger" type="submit">Удалить проект</button>
+    <button class="danger ghost" type="submit">Удалить проект</button>
   </form>
 </div>
 
@@ -34,17 +38,17 @@
     </span>
   </div>
 
-  <div class="row" style="margin-top:14px">
+  <div class="upload-row" style="margin-top:16px">
     <form method="post" enctype="multipart/form-data" class="row"
           action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/upload">
-      <input type="file" name="pdf" accept="application/pdf" required style="max-width:320px">
+      <input type="file" name="pdf" accept="application/pdf" required style="max-width:300px">
       <button class="primary" type="submit">Загрузить и порезать</button>
     </form>
     {% if floor["pdf_name"] %}
-      <span class="muted">сейчас: {{ floor["pdf_name"] }}</span>
-      <a class="btn" href="/files/floors/{{ floor['id'] }}/source.pdf" target="_blank">Открыть PDF</a>
+      <span class="muted mono" style="font-size:12.5px">{{ floor["pdf_name"] }}</span>
+      <a class="btn ghost" href="/files/floors/{{ floor['id'] }}/source.pdf" target="_blank">Открыть PDF</a>
       <form method="post" action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/recut">
-        <button type="submit">Порезать заново</button>
+        <button class="ghost" type="submit">Порезать заново</button>
       </form>
     {% endif %}
     {% if apartments %}
@@ -54,7 +58,7 @@
   </div>
 
   {% if floor["status"] == "done" and apartments %}
-    <p class="muted" style="margin-top:14px">
+    <p class="muted" style="margin-top:16px; font-size:13.5px">
       Наведите на квартиру — она подсветится; нажмите, чтобы скачать именно её.
     </p>
     <div id="viewer" class="viewer" data-floor="{{ floor['id'] }}"
@@ -69,17 +73,19 @@
     <div id="flat-list" class="list"></div>
   {% elif floor["status"] in ("queued", "working") %}
     <div id="viewer" data-floor="{{ floor['id'] }}" data-status="{{ floor['status'] }}"></div>
-    <p class="notice" style="margin-top:14px">Идёт нарезка — обычно около минуты на этаж.
-      Страница обновится сама.</p>
+    <div class="processing-note">
+      <span class="spinner"></span>
+      Идёт нарезка — обычно около минуты на этаж. Страница обновится сама.
+    </div>
   {% elif floor["status"] == "error" %}
     <div id="viewer" data-floor="{{ floor['id'] }}" data-status="{{ floor['status'] }}"></div>
-    <p class="error" style="margin-top:14px">{{ floor["message"] }}</p>
+    <div class="error" style="margin-top:16px">{{ floor["message"] }}</div>
   {% endif %}
 
   {% if floor["log"] %}
-    <details style="margin-top:14px">
-      <summary class="muted">Журнал обработки</summary>
-      <pre class="log">{{ floor["log"] }}</pre>
+    <details style="margin-top:18px">
+      <summary>Журнал обработки</summary>
+      <pre class="log" style="margin-top:10px">{{ floor["log"] }}</pre>
     </details>
   {% endif %}
 </div>
