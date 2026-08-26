@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import logging.handlers
 import os
 import zipfile
@@ -18,6 +19,8 @@ from fastapi.templating import Jinja2Templates
 from urllib.parse import quote
 
 from . import db, jobs, security
+
+USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]{3,32}$")
 from .cutter import safe_part
 from .storage import apartments_dir, ensure, floor_dir, project_dir
 
@@ -112,14 +115,14 @@ def login_form(request: Request):
 
 
 @app.post("/login", response_class=HTMLResponse)
-def login(request: Request, email: str = Form(...), password: str = Form(...)):
-    email = email.strip().lower()
-    row = db.one("SELECT * FROM users WHERE email = ?", (email,))
+def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    username = username.strip().lower()
+    row = db.one("SELECT * FROM users WHERE username = ?", (username,))
     if not row or not security.check_password(password, row["password_hash"]):
-        db.log_action(None, "login.fail", email, request.client.host if request.client else "")
-        return page(request, "login.html", error="Неверная почта или пароль", email=email)
+        db.log_action(None, "login.fail", username, request.client.host if request.client else "")
+        return page(request, "login.html", error="Неверный логин или пароль", username=username)
     if not row["is_active"]:
-        return page(request, "login.html", error="Учётная запись отключена", email=email)
+        return page(request, "login.html", error="Учётная запись отключена", username=username)
 
     token = security.create_session(row["id"])
     db.log_action(row, "login", "", request.client.host if request.client else "")
@@ -148,33 +151,36 @@ def register_form(request: Request, code: str = ""):
 
 
 @app.post("/register", response_class=HTMLResponse)
-def register(request: Request, code: str = Form(...), email: str = Form(...),
+def register(request: Request, code: str = Form(...), username: str = Form(...),
              password: str = Form(...), password2: str = Form(...)):
-    email = email.strip().lower()
+    username = username.strip().lower()
     invite = db.one("SELECT * FROM invites WHERE code = ? AND used_by IS NULL", (code.strip(),))
     if not invite:
-        return page(request, "register.html", code=code, email=email,
+        return page(request, "register.html", code=code, username=username,
                     error="Код приглашения неверный или уже использован")
-    if invite["email"] and invite["email"].strip().lower() != email:
-        return page(request, "register.html", code=code, email=email,
-                    error="Это приглашение выписано на другую почту")
+    if invite["username"] and invite["username"].strip().lower() != username:
+        return page(request, "register.html", code=code, username=username,
+                    error="Это приглашение выписано на другой логин")
+    if not USERNAME_RE.match(username):
+        return page(request, "register.html", code=code, username=username,
+                    error="Логин: 3–32 символа, латиница, цифры, точка, дефис, подчёркивание")
     if len(password) < 8:
-        return page(request, "register.html", code=code, email=email,
+        return page(request, "register.html", code=code, username=username,
                     error="Пароль должен быть не короче 8 символов")
     if password != password2:
-        return page(request, "register.html", code=code, email=email,
+        return page(request, "register.html", code=code, username=username,
                     error="Пароли не совпадают")
-    if db.one("SELECT id FROM users WHERE email = ?", (email,)):
-        return page(request, "register.html", code=code, email=email,
-                    error="Такая почта уже зарегистрирована")
+    if db.one("SELECT id FROM users WHERE username = ?", (username,)):
+        return page(request, "register.html", code=code, username=username,
+                    error="Такой логин уже занят")
 
     uid = db.execute(
-        "INSERT INTO users (email, password_hash, is_admin, is_active, created_at) "
-        "VALUES (?,?,0,1,?)", (email, security.hash_password(password), db.now()))
+        "INSERT INTO users (username, password_hash, is_admin, is_active, created_at) "
+        "VALUES (?,?,0,1,?)", (username, security.hash_password(password), db.now()))
     db.execute("UPDATE invites SET used_by=?, used_at=? WHERE code=?",
                (uid, db.now(), invite["code"]))
     token = security.create_session(uid)
-    db.log_action({"id": uid, "email": email}, "register")
+    db.log_action({"id": uid, "username": username}, "register")
     resp = RedirectResponse("/projects", status_code=303)
     resp.set_cookie(security.SESSION_COOKIE, token, httponly=True, samesite="lax",
                     max_age=security.SESSION_DAYS * 86400,
@@ -400,11 +406,11 @@ def admin(request: Request, user=Depends(require_admin)):
 
 
 @app.post("/admin/invite")
-def make_invite(request: Request, email: str = Form(""), user=Depends(require_admin)):
+def make_invite(request: Request, username: str = Form(""), user=Depends(require_admin)):
     code = security.new_invite_code()
-    db.execute("INSERT INTO invites (code, email, created_by, created_at) VALUES (?,?,?,?)",
-               (code, email.strip().lower() or None, user["id"], db.now()))
-    db.log_action(user, "invite.create", email)
+    db.execute("INSERT INTO invites (code, username, created_by, created_at) VALUES (?,?,?,?)",
+               (code, username.strip().lower() or None, user["id"], db.now()))
+    db.log_action(user, "invite.create", username)
     return RedirectResponse("/admin", status_code=303)
 
 
@@ -416,7 +422,7 @@ def toggle_user(user_id: int, request: Request, user=Depends(require_admin)):
     if row["id"] == user["id"]:
         raise HTTPException(400, "Нельзя отключить самого себя")
     db.execute("UPDATE users SET is_active = 1 - is_active WHERE id=?", (user_id,))
-    db.log_action(user, "user.toggle", row["email"])
+    db.log_action(user, "user.toggle", row["username"])
     return RedirectResponse("/admin", status_code=303)
 
 

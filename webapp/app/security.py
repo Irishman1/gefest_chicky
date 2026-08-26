@@ -66,12 +66,12 @@ def admin_bootstrap() -> None:
     """Создаёт первого администратора из переменных окружения, если пользователей нет."""
     if db.one("SELECT id FROM users LIMIT 1"):
         return
-    email = os.environ.get("ADMIN_EMAIL", "").strip().lower()
+    username = os.environ.get("ADMIN_USERNAME", "").strip().lower()
     password = os.environ.get("ADMIN_PASSWORD", "")
-    if not email or not password:
+    if not username or not password:
         return
     db.execute(
-        "INSERT INTO users (email, password_hash, is_admin, is_active, created_at) "
+        "INSERT INTO users (username, password_hash, is_admin, is_active, created_at) "
         "VALUES (?,?,1,1,?)",
-        (email, hash_password(password), db.now()),
+        (username, hash_password(password), db.now()),
     )

@@ -13,12 +13,12 @@ pip install -r webapp/requirements.txt
 Windows — https://github.com/UB-Mannheim/tesseract/wiki, Linux — `apt install tesseract-ocr`.
 
 ```bash
-set ADMIN_EMAIL=you@example.com
+set ADMIN_USERNAME=admin
 set ADMIN_PASSWORD=пароль-администратора
 python webapp/run_local.py
 ```
 
-Откройте http://127.0.0.1:8000 — под этой почтой и паролем вы администратор.
+Откройте http://127.0.0.1:8000 — под этим логином и паролем вы администратор.
 Данные (база + файлы) лежат в `data/` рядом с `webapp/`.
 
 ## Деплой на Railway
@@ -35,12 +35,12 @@ python webapp/run_local.py
    Здесь живут база данных и все нарезанные файлы — без тома они пропадут
    при каждом деплое.
 5. **Variables**: задать
-   - `ADMIN_EMAIL` — почта администратора
+   - `ADMIN_USERNAME` — логин администратора
    - `ADMIN_PASSWORD` — его пароль (администратор создаётся один раз при
      первом запуске, если пользователей в базе ещё нет)
    - `COOKIE_SECURE=1` — обязательно, раз сайт по HTTPS (Railway это даёт из коробки)
 6. **Settings → Networking**: сгенерировать публичный домен.
-7. После деплоя откройте сайт, войдите под `ADMIN_EMAIL`/`ADMIN_PASSWORD`,
+7. После деплоя откройте сайт, войдите под `ADMIN_USERNAME`/`ADMIN_PASSWORD`,
    в «Админке» создайте код приглашения для остальных пользователей.
 
 Проверено на вашем плане: нарезка этажа (19 квартир, 300 dpi) занимает

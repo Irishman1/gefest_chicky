@@ -6,8 +6,9 @@
   <p class="muted">Учётные записи выдаёт администратор.</p>
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
   <form method="post" action="/login">
-    <label>Почта</label>
-    <input type="email" name="email" value="{{ email or '' }}" required autofocus>
+    <label>Логин</label>
+    <input type="text" name="username" value="{{ username or '' }}" required autofocus
+           autocomplete="username">
     <label>Пароль</label>
     <input type="password" name="password" required>
     <div class="row" style="margin-top:16px">

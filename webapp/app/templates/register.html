@@ -8,8 +8,9 @@
   <form method="post" action="/register">
     <label>Код приглашения</label>
     <input type="text" name="code" value="{{ code or '' }}" required>
-    <label>Почта</label>
-    <input type="email" name="email" value="{{ email or '' }}" required>
+    <label>Логин (латиница, цифры, точка, дефис, подчёркивание, 3–32 символа)</label>
+    <input type="text" name="username" value="{{ username or '' }}" required
+           pattern="[a-zA-Z0-9_.\-]{3,32}" autocomplete="username">
     <label>Пароль (от 8 символов)</label>
     <input type="password" name="password" required>
     <label>Пароль ещё раз</label>

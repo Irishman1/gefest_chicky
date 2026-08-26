@@ -14,7 +14,7 @@ DB_PATH = DATA_DIR / "app.db"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    email         TEXT NOT NULL UNIQUE,
+    username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     is_admin      INTEGER NOT NULL DEFAULT 0,
     is_active     INTEGER NOT NULL DEFAULT 1,
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS invites (
     code       TEXT PRIMARY KEY,
-    email      TEXT,
+    username   TEXT,
     created_by INTEGER REFERENCES users(id),
     used_by    INTEGER REFERENCES users(id),
     created_at INTEGER NOT NULL,
@@ -68,10 +68,10 @@ CREATE TABLE IF NOT EXISTS apartments (
 );
 
 CREATE TABLE IF NOT EXISTS audit (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts      INTEGER NOT NULL,
-    user_id INTEGER,
-    email   TEXT,
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts       INTEGER NOT NULL,
+    user_id  INTEGER,
+    username TEXT,
     action  TEXT NOT NULL,
     details TEXT,
     ip      TEXT
@@ -121,7 +121,7 @@ def execute(sql: str, args: tuple = ()) -> int:
 
 def log_action(user, action: str, details: str = "", ip: str = "") -> None:
     execute(
-        "INSERT INTO audit (ts, user_id, email, action, details, ip) VALUES (?,?,?,?,?,?)",
-        (now(), user["id"] if user else None, user["email"] if user else None,
+        "INSERT INTO audit (ts, user_id, username, action, details, ip) VALUES (?,?,?,?,?,?)",
+        (now(), user["id"] if user else None, user["username"] if user else None,
          action, details, ip),
     )

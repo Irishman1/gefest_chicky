@@ -20,7 +20,7 @@
   <a class="brand" href="/projects">Нарезка планировок</a>
   <nav>
     {% if user %}
-      <span class="muted">{{ user["email"] }}</span>
+      <span class="muted">{{ user["username"] }}</span>
       {% if user["is_admin"] %}<a href="/admin">Админка</a>{% endif %}
       <a href="/logout">Выйти</a>
     {% endif %}

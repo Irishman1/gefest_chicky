@@ -19,8 +19,8 @@
 <div class="card">
   <form method="post" action="/admin/invite" class="row" style="align-items:flex-end">
     <div style="flex:1 1 260px">
-      <label>Почта (необязательно — код тогда сработает только для неё)</label>
-      <input type="email" name="email" placeholder="ivan@example.com">
+      <label>Логин (необязательно — код тогда сработает только для него)</label>
+      <input type="text" name="username" placeholder="ivan">
     </div>
     <button class="primary" type="submit">Создать код</button>
   </form>
@@ -30,7 +30,7 @@
       <tr>
         <td><code>{{ i["code"] }}</code>
             <span class="muted">/register?code={{ i["code"] }}</span></td>
-        <td>{{ i["email"] or "—" }}</td>
+        <td>{{ i["username"] or "—" }}</td>
         <td>{{ "да" if i["used_by"] else "нет" }}</td>
       </tr>
     {% endfor %}
@@ -40,10 +40,10 @@
 <h2>Пользователи</h2>
 <div class="card">
   <table>
-    <tr><th>Почта</th><th>Права</th><th>Статус</th><th></th></tr>
+    <tr><th>Логин</th><th>Права</th><th>Статус</th><th></th></tr>
     {% for u in users %}
       <tr>
-        <td>{{ u["email"] }}</td>
+        <td>{{ u["username"] }}</td>
         <td>{{ "администратор" if u["is_admin"] else "пользователь" }}</td>
         <td>{{ "активен" if u["is_active"] else "отключён" }}</td>
         <td>
@@ -63,7 +63,7 @@
     {% for a in audit %}
       <tr>
         <td class="muted">{{ a["ts"] | datetime }}</td>
-        <td>{{ a["email"] or "—" }}</td>
+        <td>{{ a["username"] or "—" }}</td>
         <td>{{ a["action"] }}</td>
         <td class="muted">{{ a["details"] }}</td>
       </tr>
