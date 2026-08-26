@@ -91,6 +91,23 @@ def page(request: Request, name: str, **ctx):
     return templates.TemplateResponse(request, name, ctx)
 
 
+@app.exception_handler(Exception)
+def unhandled_error(request: Request, exc: Exception):
+    """Любая необработанная ошибка: полный traceback в лог, пользователю — обычная страница."""
+    log.error("Необработанная ошибка на %s %s", request.method, request.url.path,
+              exc_info=exc)
+    try:
+        db.log_action(current_user(request), "error.unhandled",
+                      f"{request.method} {request.url.path}: {exc}")
+    except Exception:                                    # noqa: BLE001
+        pass  # логирование не должно само уронить обработку ошибки
+    return templates.TemplateResponse(
+        request, "error.html",
+        {"user": current_user(request), "code": 500,
+         "detail": "Что-то пошло не так. Мы уже записали это в журнал."},
+        status_code=500)
+
+
 @app.exception_handler(HTTPException)
 def http_error(request: Request, exc: HTTPException):
     if exc.status_code == 401:

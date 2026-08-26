@@ -44,6 +44,10 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 # Підпис квартири: "А-12.1", "К-3.15", "A-12,1". Перший символ може не
 # розпізнатись зі шрифту PDF (�) або бути прочитаний OCR як латиниця — не біда.
 LABEL_RE = re.compile(r"^\s*([^\s\-\u2013]{0,3})[\-\u2013\u2014](\d{1,3})[.,](\d{1,3})\s*$")
+# Some plans label an apartment as bare "24.1" (no letter, no dash) - the same
+# shape as an area figure ("39.72"). We tell a bare label apart by font size:
+# it is always noticeably larger than the area numbers printed under it.
+BARE_LABEL_RE = re.compile(r"^\s*(\d{1,3})[.,](\d{1,3})\s*$")
 FLOOR_IN_NAME_RE = re.compile(r"(\d{1,3})\s*(?:-?[а-яїієґ]{0,3})?\s*(?:поверх|этаж|floor)", re.I)
 
 
@@ -151,19 +155,103 @@ def paths_to_mask(page_rect, paths, dpi, clip=None):
     return arr < 128
 
 
-def find_text_labels(page, prefix):
-    """Підписи квартир із текстового шару PDF."""
+def _cluster_topleft(items, max_dx=8.0, max_dy=20.0):
+    """
+    items: list of (floor, num, bbox, size).
+
+    Groups bounding boxes that sit close together - an apartment's label and
+    the area figures under it are usually within ~5-15pt vertically - and
+    keeps only the top member of each group, that is the label.
+
+    dx and dy use separate, deliberately different limits. A label and its
+    own area figures are stacked in the same column (near-zero or negative
+    dx, i.e. their x-ranges overlap), so max_dx is tight. Two neighbouring
+    apartments packed close together can still land within max_dy of each
+    other diagonally; a tight max_dx keeps that diagonal case from bridging
+    them into one cluster and swallowing one apartment's label.
+    """
+    n = len(items)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        xi0, yi0, xi1, yi1 = items[i][2]
+        for j in range(i + 1, n):
+            xj0, yj0, xj1, yj1 = items[j][2]
+            dx = max(xi0, xj0) - min(xi1, xj1)
+            dy = max(yi0, yj0) - min(yi1, yj1)
+            if dx <= max_dx and dy <= max_dy:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[rj] = ri
+
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
     out = []
+    for members in groups.values():
+        # the label is always the largest text in its own info-box. If two
+        # apartments' boxes end up merged into one group anyway (their gap
+        # can be as small as a label-to-area gap), there will be two members
+        # sharing that top font size instead of one - keep both rather than
+        # picking a single "top-left" one and losing an apartment.
+        top_size = max(items[i][3] for i in members)
+        labels = [i for i in members if items[i][3] == top_size]
+        for i in labels:
+            out.append(items[i])
+    return out
+
+
+def find_text_labels(page, prefix):
+    """
+    Apartment labels from the PDF text layer.
+
+    Most plans write "A-12.1" (letter, dash, floor, number) - unambiguous,
+    taken as-is. Some plans instead write a bare "24.1", which has the exact
+    same shape as an area figure ("39.72"). To tell them apart: drop
+    whatever bare number sits at the page's single most common font size
+    (that is always the dimension-line callouts scattered over the plan,
+    vastly outnumbering real labels); what remains is grouped by proximity
+    into apartment info-boxes (label plus its one or two area lines), and
+    only the label - the top-left item of each group - is kept.
+    """
+    trusted, bare = [], []
     for block in page.get_text("dict")["blocks"]:
         for line in block.get("lines", []):
             for span in line["spans"]:
-                parsed = parse_label(span["text"], prefix)
-                if not parsed:
+                text = span["text"]
+                parsed = parse_label(text, prefix)
+                if parsed:
+                    label, floor, num = parsed
+                    x0, y0, x1, y1 = span["bbox"]
+                    trusted.append(Apartment(label, floor, num,
+                                             ((x0 + x1) / 2, (y0 + y1) / 2)))
                     continue
-                label, floor, num = parsed
-                x0, y0, x1, y1 = span["bbox"]
-                out.append(Apartment(label, floor, num, ((x0 + x1) / 2, (y0 + y1) / 2)))
-    return out
+                bm = BARE_LABEL_RE.match(text)
+                if bm:
+                    bare.append((bm.group(1), bm.group(2), span["bbox"],
+                                round(span["size"], 1)))
+
+    if not bare:
+        return trusted
+
+    counts = {}
+    for *_, sz in bare:
+        counts[sz] = counts.get(sz, 0) + 1
+    noise_size = max(counts, key=counts.get)   # dimension callouts: the most common size
+    bare = [b for b in bare if b[3] > noise_size + 0.3]
+
+    for floor, num, bbox, _sz in _cluster_topleft(bare):
+        x0, y0, x1, y1 = bbox
+        trusted.append(Apartment(f"{prefix}-{floor}.{num}", floor, num,
+                                 ((x0 + x1) / 2, (y0 + y1) / 2)))
+    return trusted
 
 
 def vector_apartments(page, labels, args):
