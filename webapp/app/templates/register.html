@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Регистрация{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Регистрация</h1>
+  <p class="muted">Нужен код приглашения от администратора.</p>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="post" action="/register">
+    <label>Код приглашения</label>
+    <input type="text" name="code" value="{{ code or '' }}" required>
+    <label>Почта</label>
+    <input type="email" name="email" value="{{ email or '' }}" required>
+    <label>Пароль (от 8 символов)</label>
+    <input type="password" name="password" required>
+    <label>Пароль ещё раз</label>
+    <input type="password" name="password2" required>
+    <div class="row" style="margin-top:16px">
+      <button class="primary" type="submit">Создать аккаунт</button>
+      <a class="btn" href="/login">Уже есть аккаунт</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

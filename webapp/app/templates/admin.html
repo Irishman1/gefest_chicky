@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Админка{% endblock %}
+{% block content %}
+<h1>Админка</h1>
+
+<h2>Бэкап</h2>
+<div class="card row" style="align-items:center">
+  <a class="btn primary" href="/admin/backup">Скачать бэкап (вся база и файлы)</a>
+  <span class="spacer"></span>
+  <form method="post" action="/admin/restore" enctype="multipart/form-data" class="row"
+        onsubmit="return confirm('Это ПОЛНОСТЬЮ заменит текущие данные содержимым архива. Продолжить?')">
+    <input type="file" name="archive" accept=".zip" required>
+    <button class="danger" type="submit">Восстановить из бэкапа</button>
+  </form>
+</div>
+<p class="muted">После восстановления перезапустите сервис.</p>
+
+<h2>Пригласить пользователя</h2>
+<div class="card">
+  <form method="post" action="/admin/invite" class="row" style="align-items:flex-end">
+    <div style="flex:1 1 260px">
+      <label>Почта (необязательно — код тогда сработает только для неё)</label>
+      <input type="email" name="email" placeholder="ivan@example.com">
+    </div>
+    <button class="primary" type="submit">Создать код</button>
+  </form>
+  <table style="margin-top:14px">
+    <tr><th>Код</th><th>Для кого</th><th>Использован</th></tr>
+    {% for i in invites %}
+      <tr>
+        <td><code>{{ i["code"] }}</code>
+            <span class="muted">/register?code={{ i["code"] }}</span></td>
+        <td>{{ i["email"] or "—" }}</td>
+        <td>{{ "да" if i["used_by"] else "нет" }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<h2>Пользователи</h2>
+<div class="card">
+  <table>
+    <tr><th>Почта</th><th>Права</th><th>Статус</th><th></th></tr>
+    {% for u in users %}
+      <tr>
+        <td>{{ u["email"] }}</td>
+        <td>{{ "администратор" if u["is_admin"] else "пользователь" }}</td>
+        <td>{{ "активен" if u["is_active"] else "отключён" }}</td>
+        <td>
+          <form method="post" action="/admin/users/{{ u['id'] }}/toggle">
+            <button type="submit">{{ "Отключить" if u["is_active"] else "Включить" }}</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<h2>Журнал действий</h2>
+<div class="card">
+  <table>
+    <tr><th>Время</th><th>Кто</th><th>Действие</th><th>Детали</th></tr>
+    {% for a in audit %}
+      <tr>
+        <td class="muted">{{ a["ts"] | datetime }}</td>
+        <td>{{ a["email"] or "—" }}</td>
+        <td>{{ a["action"] }}</td>
+        <td class="muted">{{ a["details"] }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

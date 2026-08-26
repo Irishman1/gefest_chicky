@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Ошибка {{ code }}{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Ошибка {{ code }}</h1>
+  <p>{{ detail }}</p>
+  <a class="btn" href="/projects">К проектам</a>
+</div>
+{% endblock %}

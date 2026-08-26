@@ -1,0 +1,7 @@
+.git
+data/
+output/
+webapp/backups/
+**/__pycache__/
+*.pyc
+*.pdf

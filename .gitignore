@@ -1,0 +1,7 @@
+data/
+output/
+webapp/backups/
+**/__pycache__/
+*.pyc
+*.pdf
+.env

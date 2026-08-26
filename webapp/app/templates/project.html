@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}{{ project["name"] }}{% endblock %}
+{% block content %}
+
+<div class="row">
+  <div>
+    <h1>{{ project["name"] }}</h1>
+    <div class="muted">{{ project["floors"] }} этажей · файлы называются
+      <code>{{ project["name"] }}_{{ floor["number"] }}_2.png</code></div>
+  </div>
+  <span class="spacer"></span>
+  <a class="btn" href="/download/project/{{ project['id'] }}">Скачать весь объект</a>
+  <form method="post" action="/projects/{{ project['id'] }}/delete"
+        onsubmit="return confirm('Удалить проект вместе со всеми этажами и файлами?')">
+    <button class="danger" type="submit">Удалить проект</button>
+  </form>
+</div>
+
+<div class="floors">
+  {% for f in floors %}
+    <a class="floor-btn {{ f['status'] }} {% if f['id'] == floor['id'] %}active{% endif %}"
+       href="/projects/{{ project['id'] }}?floor={{ f['number'] }}">
+      {{ f["number"] }}<span class="dot"></span>
+    </a>
+  {% endfor %}
+</div>
+
+<div class="card">
+  <div class="row">
+    <h2 style="margin:0">Этаж {{ floor["number"] }}</h2>
+    <span class="spacer"></span>
+    <span id="floor-status" class="status {{ floor['status'] }}">
+      {% if floor["status"] == "empty" %}PDF не загружен{% else %}{{ floor["message"] or floor["status"] }}{% endif %}
+    </span>
+  </div>
+
+  <div class="row" style="margin-top:14px">
+    <form method="post" enctype="multipart/form-data" class="row"
+          action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/upload">
+      <input type="file" name="pdf" accept="application/pdf" required style="max-width:320px">
+      <button class="primary" type="submit">Загрузить и порезать</button>
+    </form>
+    {% if floor["pdf_name"] %}
+      <span class="muted">сейчас: {{ floor["pdf_name"] }}</span>
+      <a class="btn" href="/files/floors/{{ floor['id'] }}/source.pdf" target="_blank">Открыть PDF</a>
+      <form method="post" action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/recut">
+        <button type="submit">Порезать заново</button>
+      </form>
+    {% endif %}
+    {% if apartments %}
+      <span class="spacer"></span>
+      <a class="btn primary" href="/download/floor/{{ floor['id'] }}">Скачать все ({{ apartments|length }})</a>
+    {% endif %}
+  </div>
+
+  {% if floor["status"] == "done" and apartments %}
+    <p class="muted" style="margin-top:14px">
+      Наведите на квартиру — она подсветится; нажмите, чтобы скачать именно её.
+    </p>
+    <div id="viewer" class="viewer" data-floor="{{ floor['id'] }}"
+         data-status="{{ floor['status'] }}"
+         data-flats='{{ flats_json | tojson }}'>
+      <div class="viewer-inner">
+        <img id="plan" src="/files/floors/{{ floor['id'] }}/preview.png" alt="План этажа">
+        <canvas id="overlay"></canvas>
+        <div id="hint" class="hint"></div>
+      </div>
+    </div>
+    <div id="flat-list" class="list"></div>
+  {% elif floor["status"] in ("queued", "working") %}
+    <div id="viewer" data-floor="{{ floor['id'] }}" data-status="{{ floor['status'] }}"></div>
+    <p class="notice" style="margin-top:14px">Идёт нарезка — обычно около минуты на этаж.
+      Страница обновится сама.</p>
+  {% elif floor["status"] == "error" %}
+    <div id="viewer" data-floor="{{ floor['id'] }}" data-status="{{ floor['status'] }}"></div>
+    <p class="error" style="margin-top:14px">{{ floor["message"] }}</p>
+  {% endif %}
+
+  {% if floor["log"] %}
+    <details style="margin-top:14px">
+      <summary class="muted">Журнал обработки</summary>
+      <pre class="log">{{ floor["log"] }}</pre>
+    </details>
+  {% endif %}
+</div>
+{% endblock %}
