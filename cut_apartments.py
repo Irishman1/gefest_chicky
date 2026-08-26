@@ -276,6 +276,21 @@ def vector_apartments(page, labels, args):
                     break
         (owner.paths if owner else unassigned).append(path)
 
+    # Деякі плани малюють підпис за 1-3pt від межі його заливки, а не строго
+    # всередині (частіше трапляється в кутових приміщеннях зі скошеними
+    # стінами). Для підписів, яким не дісталось власної заливки, пробуємо
+    # ще раз з невеликим допуском - тільки серед ще не розібраних заливок.
+    stray = [a for a in labels if not a.paths]
+    if stray:
+        tol = 3.0
+        for path in list(unassigned):
+            r = path["rect"]
+            near = [a for a in stray if not a.paths
+                   and rect_gap(fitz.Rect(a.point, a.point), r) <= tol]
+            if near:
+                near[0].paths.append(path)
+                unassigned.remove(path)
+
     bodies = [a for a in labels if a.paths]
     for a in bodies:
         a.rect = union_rect(a.paths)
@@ -286,12 +301,24 @@ def vector_apartments(page, labels, args):
     # фрагмента, а не від фактичної форми квартири, і далекий шматок може
     # "проскочити" лише тому, що випадково опинився поруч з якимось іншим
     # уже приєднаним фрагментом.
+    #
+    # Запобіжник: у щільній забудові (кутові студії на скісному фасаді тощо)
+    # жадібне приєднання інакше може ланцюжком підхопити чужі кімнати одну
+    # за одною й роздути квартиру в рази - обмежуємо приєднану площу
+    # відносно того, що квартирі реально належить від початку.
+    own_area = {id(a): sum(pp["rect"].get_area() for pp in a.paths) for a in bodies}
+    added_area = {id(a): 0.0 for a in bodies}
+    area_cap = 2.0
+
     remaining = list(unassigned)
     while remaining:
         best_i, best_a, best_score = None, None, None
         for i, path in enumerate(remaining):
             r = path["rect"]
+            area = r.get_area()
             for a in bodies:
+                if added_area[id(a)] + area > own_area[id(a)] * area_cap:
+                    continue
                 gap = rect_gap(r, a.rect)
                 ovl = rect_overlap_area(r, a.rect)
                 if ovl <= 0 and gap > args.attach_gap:
@@ -301,8 +328,10 @@ def vector_apartments(page, labels, args):
                     best_i, best_a, best_score = i, a, score
         if best_a is None:
             break
-        best_a.paths.append(remaining.pop(best_i))
+        picked = remaining.pop(best_i)
+        best_a.paths.append(picked)
         best_a.rect = union_rect(best_a.paths)
+        added_area[id(best_a)] += picked["rect"].get_area()
     orphans = len(remaining)
 
     for a in bodies:
