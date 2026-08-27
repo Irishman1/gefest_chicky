@@ -1,47 +1,58 @@
 {% extends "base.html" %}
 {% block title %}Проекты{% endblock %}
 {% block content %}
-<div class="eyebrow">Рабочее пространство</div>
-<h1>Проекты</h1>
-<p class="lede">Объект — это дом. Внутри переключаются этажи, на каждый загружается свой PDF плана.</p>
 
-<div class="new-project-card">
-  <form method="post" action="/projects" class="row">
+<div class="page-head">
+  <div>
+    <h1>Проекты</h1>
+    <p class="lede">Объект — это дом. Внутри переключаются этажи, на каждый загружается свой PDF плана.</p>
+  </div>
+</div>
+
+<div class="card">
+  <form method="post" action="/projects" class="new-project">
     <div class="field-grow">
-      <label>Название объекта</label>
-      <input type="text" name="name" placeholder="Эллада-7" required>
+      <label for="np-name">Название объекта</label>
+      <input id="np-name" type="text" name="name" placeholder="Эллада-7" required>
     </div>
-    <div style="flex:0 1 140px">
-      <label>Этажей</label>
-      <input type="number" name="floors" min="1" max="200" value="12" required>
+    <div class="field-num">
+      <label for="np-floors">Этажей</label>
+      <input id="np-floors" type="number" name="floors" min="1" max="200" value="12" required>
     </div>
     <button class="primary" type="submit">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-      Создать проект
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      Создать
     </button>
   </form>
 </div>
 
-{% if projects %}
-<div class="grid">
-  {% for p in projects %}
-  <a class="tile" href="/projects/{{ p['id'] }}">
-    <h3>{{ p["name"] }}</h3>
-    <div class="tile-stats">
-      <div class="stat"><b>{{ p["floors"] }}</b><span>этажей</span></div>
-      <div class="stat"><b>{{ p["ready"] }}</b><span>готово</span></div>
-      <div class="stat"><b>{{ p["flats"] }}</b><span>квартир</span></div>
+<div class="section">
+  <h2>Объекты <span class="count">{{ projects|length }}</span></h2>
+
+  {% if projects %}
+    <div class="grid">
+      {% for p in projects %}
+        {% set pct = (p['ready'] * 100 // p['floors']) if p['floors'] else 0 %}
+        <a class="tile" href="/projects/{{ p['id'] }}">
+          <div class="tile-top">
+            <h3>{{ p["name"] }}</h3>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
+          </div>
+          <div class="tile-stats">
+            <div class="stat"><span>этажей</span><b>{{ p["floors"] }}</b></div>
+            <div class="stat"><span>нарезано</span><b>{{ p["ready"] }}</b></div>
+            <div class="stat"><span>квартир</span><b>{{ p["flats"] }}</b></div>
+          </div>
+          <div class="bar {% if pct >= 100 %}full{% endif %}"><i style="width:{{ pct }}%"></i></div>
+        </a>
+      {% endfor %}
     </div>
-    <div class="progress-track">
-      <div class="progress-fill" style="width:{{ (p['ready'] / p['floors'] * 100) if p['floors'] else 0 }}%"></div>
+  {% else %}
+    <div class="empty">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M11 3v6M11 12v9M11 14h10"/></svg>
+      <div>Проектов пока нет — создайте первый в форме выше.</div>
     </div>
-  </a>
-  {% endfor %}
+  {% endif %}
 </div>
-{% else %}
-<div class="empty-state">
-  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/></svg>
-  <div>Проектов пока нет — создайте первый выше.</div>
-</div>
-{% endif %}
+
 {% endblock %}

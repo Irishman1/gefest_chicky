@@ -1,34 +1,42 @@
 {% extends "base.html" %}
 {% block title %}Регистрация{% endblock %}
-{% block content %}
-<div class="card narrow">
-  <div class="auth-mark">
-    <svg width="46" height="46" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect x="1" y="1" width="24" height="24" rx="6" fill="var(--accent)"/>
-      <path d="M6 18.5V8.5C6 7.67157 6.67157 7 7.5 7H14.5L20 12.5V18.5C20 19.3284 19.3284 20 18.5 20H7.5C6.67157 20 6 19.3284 6 18.5Z" stroke="var(--accent-ink)" stroke-width="1.5" stroke-linejoin="round"/>
-      <path d="M14.5 7V11.5C14.5 12.0523 14.9477 12.5 15.5 12.5H20" stroke="var(--accent-ink)" stroke-width="1.5" stroke-linejoin="round"/>
-      <path d="M9 15H14" stroke="var(--accent-ink)" stroke-width="1.5" stroke-linecap="round"/>
-    </svg>
+{% block body %}
+<div class="auth">
+  <div class="auth-box">
+    <div class="card">
+      <div class="auth-mark">{% with mark_size = 26 %}{% include "_mark.svg" %}{% endwith %}</div>
+      <h1>Создать аккаунт</h1>
+      <p class="lede">Нужен код приглашения от администратора.</p>
+
+      {% if error %}
+        <div class="error" style="margin-bottom:16px">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5M12 16.2v.01"/></svg>
+          <span>{{ error }}</span>
+        </div>
+      {% endif %}
+
+      <form method="post" action="/register">
+        <div class="f">
+          <label for="c">Код приглашения</label>
+          <input id="c" type="text" name="code" value="{{ code or '' }}" required autocomplete="off">
+        </div>
+        <div class="f">
+          <label for="u">Логин</label>
+          <input id="u" type="text" name="username" value="{{ username or '' }}" required
+                 pattern="[a-zA-Z0-9_.\-]{3,32}" autocomplete="username">
+        </div>
+        <div class="f">
+          <label for="p">Пароль <span class="muted">— от 8 символов</span></label>
+          <input id="p" type="password" name="password" required autocomplete="new-password">
+        </div>
+        <div class="f">
+          <label for="p2">Пароль ещё раз</label>
+          <input id="p2" type="password" name="password2" required autocomplete="new-password">
+        </div>
+        <button class="primary btn-block" type="submit">Создать аккаунт</button>
+      </form>
+    </div>
+    <div class="auth-foot">Уже есть аккаунт? <a href="/login">Войти</a></div>
   </div>
-  <h1>Регистрация</h1>
-  <p class="lede">Нужен код приглашения от администратора.</p>
-  {% if error %}<div class="error">{{ error }}</div>{% endif %}
-  <form method="post" action="/register">
-    <label>Код приглашения</label>
-    <input type="text" name="code" value="{{ code or '' }}" required>
-    <label>Логин</label>
-    <input type="text" name="username" value="{{ username or '' }}" required
-           pattern="[a-zA-Z0-9_.\-]{3,32}" autocomplete="username">
-    <label>Пароль (от 8 символов)</label>
-    <input type="password" name="password" required autocomplete="new-password">
-    <label>Пароль ещё раз</label>
-    <input type="password" name="password2" required autocomplete="new-password">
-    <div class="row" style="margin-top:20px">
-      <button class="primary" type="submit" style="width:100%; justify-content:center">Создать аккаунт</button>
-    </div>
-    <div class="row" style="margin-top:12px; justify-content:center">
-      <a class="muted" href="/login" style="font-size:13px">Уже есть аккаунт? Войти</a>
-    </div>
-  </form>
 </div>
 {% endblock %}

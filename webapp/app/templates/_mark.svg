@@ -1,0 +1,1 @@
+<svg width="{{ mark_size | default(20) }}" height="{{ mark_size | default(20) }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M11 3v6M11 12v9M11 14h10"/></svg>

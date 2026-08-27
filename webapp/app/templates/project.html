@@ -2,91 +2,111 @@
 {% block title %}{{ project["name"] }}{% endblock %}
 {% block content %}
 
-<div class="project-head row">
+<div class="page-head">
   <div>
-    <div class="eyebrow">Объект</div>
     <h1>{{ project["name"] }}</h1>
-    <div class="lede">{{ project["floors"] }} этажей &middot; файлы называются
-      <code>{{ project["name"] }}_{{ floor["number"] }}_2.png</code></div>
+    <p class="lede">{{ project["floors"] }} этажей. Выберите этаж ниже и загрузите PDF плана.</p>
   </div>
-  <span class="spacer"></span>
-  <a class="btn" href="/download/project/{{ project['id'] }}">
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0-4-4m4 4 4-4M4 21h16"/></svg>
-    Скачать весь объект
-  </a>
-  <form method="post" action="/projects/{{ project['id'] }}/delete"
-        onsubmit="return confirm('Удалить проект вместе со всеми этажами и файлами?')">
-    <button class="danger ghost" type="submit">Удалить проект</button>
-  </form>
+  <div class="actions">
+    <a class="btn" href="/download/project/{{ project['id'] }}">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0-4-4m4 4 4-4M4 21h16"/></svg>
+      Скачать объект
+    </a>
+    <form method="post" action="/projects/{{ project['id'] }}/delete"
+          onsubmit="return confirm('Удалить проект вместе со всеми этажами и файлами?')">
+      <button class="ghost danger" type="submit">Удалить</button>
+    </form>
+  </div>
 </div>
 
 <div class="floors">
   {% for f in floors %}
-    <a class="floor-btn {{ f['status'] }} {% if f['id'] == floor['id'] %}active{% endif %}"
-       href="/projects/{{ project['id'] }}?floor={{ f['number'] }}">
-      {{ f["number"] }}<span class="dot"></span>
-    </a>
+    <a class="floor {{ f['status'] }} {% if f['id'] == floor['id'] %}active{% endif %}"
+       href="/projects/{{ project['id'] }}?floor={{ f['number'] }}"
+       title="Этаж {{ f['number'] }}">{{ f["number"] }}<i></i></a>
   {% endfor %}
 </div>
+<div class="legend">
+  <span class="l-done"><i></i>нарезан</span>
+  <span class="l-work"><i></i>в работе</span>
+  <span class="l-err"><i></i>ошибка</span>
+  <span><i></i>без PDF</span>
+</div>
 
-<div class="card">
-  <div class="row">
-    <h2 style="margin:0">Этаж {{ floor["number"] }}</h2>
+<div class="card flush" style="margin-top:22px">
+  <div class="panel-head">
+    <h2>Этаж {{ floor["number"] }}</h2>
     <span class="spacer"></span>
     <span id="floor-status" class="status {{ floor['status'] }}">
       {% if floor["status"] == "empty" %}PDF не загружен{% else %}{{ floor["message"] or floor["status"] }}{% endif %}
     </span>
   </div>
 
-  <div class="upload-row" style="margin-top:16px">
-    <form method="post" enctype="multipart/form-data" class="row"
-          action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/upload">
-      <input type="file" name="pdf" accept="application/pdf" required style="max-width:300px">
-      <button class="primary" type="submit">Загрузить и порезать</button>
-    </form>
-    {% if floor["pdf_name"] %}
-      <span class="muted mono" style="font-size:12.5px">{{ floor["pdf_name"] }}</span>
-      <a class="btn ghost" href="/files/floors/{{ floor['id'] }}/source.pdf" target="_blank">Открыть PDF</a>
-      <form method="post" action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/recut">
-        <button class="ghost" type="submit">Порезать заново</button>
+  <div class="panel-body">
+    <div class="toolbar">
+      <form method="post" enctype="multipart/form-data" class="row"
+            action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/upload">
+        <input type="file" name="pdf" accept="application/pdf" required>
+        <button class="primary" type="submit">Загрузить и порезать</button>
       </form>
+
+      {% if floor["pdf_name"] %}
+        <span class="file-tag" title="{{ floor['pdf_name'] }}">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+          <span>{{ floor["pdf_name"] }}</span>
+        </span>
+        <a class="btn btn-sm ghost" href="/files/floors/{{ floor['id'] }}/source.pdf" target="_blank">Открыть</a>
+        <form method="post" action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/recut">
+          <button class="btn-sm ghost" type="submit">Порезать заново</button>
+        </form>
+      {% endif %}
+
+      {% if apartments %}
+        <span class="spacer"></span>
+        <a class="btn" href="/download/floor/{{ floor['id'] }}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0-4-4m4 4 4-4M4 21h16"/></svg>
+          Скачать все ({{ apartments|length }})
+        </a>
+      {% endif %}
+    </div>
+
+    {% if floor["status"] == "done" and apartments %}
+      <p class="lede" style="margin-top:14px">
+        Наведите на квартиру — она подсветится. Нажмите, чтобы скачать именно её.
+      </p>
+      <div id="viewer" class="viewer" data-floor="{{ floor['id'] }}"
+           data-status="{{ floor['status'] }}"
+           data-flats='{{ flats_json | tojson }}'>
+        <div class="viewer-inner">
+          <img id="plan" src="/files/floors/{{ floor['id'] }}/preview.png" alt="План этажа {{ floor['number'] }}">
+          <canvas id="overlay"></canvas>
+          <div id="hint" class="hint"></div>
+        </div>
+      </div>
+      <div id="flat-list" class="flats"></div>
+
+    {% elif floor["status"] in ("queued", "working") %}
+      <div id="viewer" data-floor="{{ floor['id'] }}" data-status="{{ floor['status'] }}"></div>
+      <div class="working-note">
+        <span class="spinner"></span>
+        Идёт нарезка — обычно около минуты на этаж. Страница обновится сама.
+      </div>
+
+    {% elif floor["status"] == "error" %}
+      <div id="viewer" data-floor="{{ floor['id'] }}" data-status="{{ floor['status'] }}"></div>
+      <div class="error" style="margin-top:16px">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5M12 16.2v.01"/></svg>
+        <span>{{ floor["message"] }}</span>
+      </div>
     {% endif %}
-    {% if apartments %}
-      <span class="spacer"></span>
-      <a class="btn primary" href="/download/floor/{{ floor['id'] }}">Скачать все ({{ apartments|length }})</a>
+
+    {% if floor["log"] %}
+      <details>
+        <summary>Журнал обработки</summary>
+        <pre class="log">{{ floor["log"] }}</pre>
+      </details>
     {% endif %}
   </div>
-
-  {% if floor["status"] == "done" and apartments %}
-    <p class="muted" style="margin-top:16px; font-size:13.5px">
-      Наведите на квартиру — она подсветится; нажмите, чтобы скачать именно её.
-    </p>
-    <div id="viewer" class="viewer" data-floor="{{ floor['id'] }}"
-         data-status="{{ floor['status'] }}"
-         data-flats='{{ flats_json | tojson }}'>
-      <div class="viewer-inner">
-        <img id="plan" src="/files/floors/{{ floor['id'] }}/preview.png" alt="План этажа">
-        <canvas id="overlay"></canvas>
-        <div id="hint" class="hint"></div>
-      </div>
-    </div>
-    <div id="flat-list" class="list"></div>
-  {% elif floor["status"] in ("queued", "working") %}
-    <div id="viewer" data-floor="{{ floor['id'] }}" data-status="{{ floor['status'] }}"></div>
-    <div class="processing-note">
-      <span class="spinner"></span>
-      Идёт нарезка — обычно около минуты на этаж. Страница обновится сама.
-    </div>
-  {% elif floor["status"] == "error" %}
-    <div id="viewer" data-floor="{{ floor['id'] }}" data-status="{{ floor['status'] }}"></div>
-    <div class="error" style="margin-top:16px">{{ floor["message"] }}</div>
-  {% endif %}
-
-  {% if floor["log"] %}
-    <details style="margin-top:18px">
-      <summary>Журнал обработки</summary>
-      <pre class="log" style="margin-top:10px">{{ floor["log"] }}</pre>
-    </details>
-  {% endif %}
 </div>
+
 {% endblock %}

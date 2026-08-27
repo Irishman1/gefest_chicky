@@ -1,83 +1,121 @@
 {% extends "base.html" %}
 {% block title %}Админка{% endblock %}
 {% block content %}
-<div class="eyebrow">Управление</div>
-<h1>Админка</h1>
 
-<h2>Бэкап</h2>
-<div class="card row" style="align-items:center">
-  <a class="btn primary" href="/admin/backup">
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0-4-4m4 4 4-4M4 21h16"/></svg>
-    Скачать бэкап
-  </a>
-  <span class="muted" style="font-size:13px">вся база и файлы одним архивом</span>
-  <span class="spacer"></span>
-  <form method="post" action="/admin/restore" enctype="multipart/form-data" class="row"
-        onsubmit="return confirm('Это ПОЛНОСТЬЮ заменит текущие данные содержимым архива. Продолжить?')">
-    <input type="file" name="archive" accept=".zip" required style="max-width:220px">
-    <button class="danger" type="submit">Восстановить</button>
-  </form>
+<div class="page-head">
+  <div>
+    <h1>Админка</h1>
+    <p class="lede">Приглашения, доступы и резервные копии.</p>
+  </div>
 </div>
-<p class="muted" style="font-size:12.5px; margin-top:8px">После восстановления перезапустите сервис.</p>
 
-<h2>Пригласить пользователя</h2>
-<div class="card">
-  <form method="post" action="/admin/invite" class="row" style="align-items:flex-end">
-    <div class="field-grow">
-      <label>Логин (необязательно — код тогда сработает только для него)</label>
-      <input type="text" name="username" placeholder="ivan">
-    </div>
-    <button class="primary" type="submit">Создать код</button>
-  </form>
+<div class="section">
+  <h2>Пригласить пользователя</h2>
+  <div class="card">
+    <form method="post" action="/admin/invite" class="new-project">
+      <div class="field-grow">
+        <label for="inv">Логин <span class="muted">— необязательно; тогда код сработает только для него</span></label>
+        <input id="inv" type="text" name="username" placeholder="ivan">
+      </div>
+      <button class="primary" type="submit">Создать код</button>
+    </form>
+  </div>
+
   {% if invites %}
-  <table style="margin-top:18px">
-    <tr><th>Код</th><th>Для кого</th><th>Использован</th></tr>
-    {% for i in invites %}
-      <tr>
-        <td><code>{{ i["code"] }}</code></td>
-        <td class="muted" style="font-size:12.5px">/register?code={{ i["code"] }}</td>
-        <td>{{ "да" if i["used_by"] else "нет" }}</td>
-      </tr>
-    {% endfor %}
-  </table>
+    <div class="card table-card" style="margin-top:10px">
+      <table>
+        <thead><tr><th>Код</th><th>Ссылка для регистрации</th><th class="shrink">Использован</th></tr></thead>
+        <tbody>
+          {% for i in invites %}
+            <tr>
+              <td class="shrink"><code>{{ i["code"] }}</code></td>
+              <td>
+                <button class="copy" type="button" data-copy="/register?code={{ i['code'] }}">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
+                  <span class="mono">/register?code={{ i["code"] }}</span>
+                </button>
+              </td>
+              <td class="shrink">
+                {% if i["used_by"] %}
+                  <span class="status done">использован</span>
+                {% else %}
+                  <span class="status">не использован</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% endif %}
 </div>
 
-<h2>Пользователи</h2>
-<div class="card">
-  <table>
-    <tr><th>Логин</th><th>Права</th><th>Статус</th><th></th></tr>
-    {% for u in users %}
-      <tr>
-        <td class="mono">{{ u["username"] }}</td>
-        <td>{{ "администратор" if u["is_admin"] else "пользователь" }}</td>
-        <td>
-          <span class="status {{ 'done' if u['is_active'] else 'error' }}" style="padding:3px 10px 3px 8px; font-size:12px">
-            {{ "активен" if u["is_active"] else "отключён" }}
-          </span>
-        </td>
-        <td>
-          <form method="post" action="/admin/users/{{ u['id'] }}/toggle">
-            <button class="ghost" type="submit" style="font-size:12.5px; padding:6px 10px">{{ "Отключить" if u["is_active"] else "Включить" }}</button>
-          </form>
-        </td>
-      </tr>
-    {% endfor %}
-  </table>
+<div class="section">
+  <h2>Пользователи <span class="count">{{ users|length }}</span></h2>
+  <div class="card table-card">
+    <table>
+      <thead><tr><th>Логин</th><th>Права</th><th>Статус</th><th class="shrink"></th></tr></thead>
+      <tbody>
+        {% for u in users %}
+          <tr>
+            <td class="mono">{{ u["username"] }}</td>
+            <td class="muted">{{ "администратор" if u["is_admin"] else "пользователь" }}</td>
+            <td>
+              <span class="status {{ 'done' if u['is_active'] else 'error' }}">
+                {{ "активен" if u["is_active"] else "отключён" }}
+              </span>
+            </td>
+            <td class="shrink">
+              <form method="post" action="/admin/users/{{ u['id'] }}/toggle">
+                <button class="btn-sm ghost" type="submit">{{ "Отключить" if u["is_active"] else "Включить" }}</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
 
-<h2>Журнал действий</h2>
-<div class="card">
-  <table>
-    <tr><th>Время</th><th>Кто</th><th>Действие</th><th>Детали</th></tr>
-    {% for a in audit %}
-      <tr>
-        <td class="muted mono" style="font-size:12px">{{ a["ts"] | datetime }}</td>
-        <td>{{ a["username"] or "—" }}</td>
-        <td class="mono" style="font-size:12.5px">{{ a["action"] }}</td>
-        <td class="muted">{{ a["details"] }}</td>
-      </tr>
-    {% endfor %}
-  </table>
+<div class="section">
+  <h2>Резервная копия</h2>
+  <div class="card">
+    <div class="row">
+      <a class="btn" href="/admin/backup">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0-4-4m4 4 4-4M4 21h16"/></svg>
+        Скачать бэкап
+      </a>
+      <span class="muted" style="font-size:12.5px">вся база и файлы одним zip-архивом</span>
+      <span class="spacer"></span>
+      <form method="post" action="/admin/restore" enctype="multipart/form-data" class="row"
+            onsubmit="return confirm('Это ПОЛНОСТЬЮ заменит текущие данные содержимым архива. Продолжить?')">
+        <input type="file" name="archive" accept=".zip" required>
+        <button class="danger" type="submit">Восстановить</button>
+      </form>
+    </div>
+    <p class="muted" style="font-size:12.5px; margin-top:12px">
+      Восстановление перезатирает текущие данные. После него перезапустите сервис.
+    </p>
+  </div>
 </div>
+
+<div class="section">
+  <h2>Журнал действий</h2>
+  <div class="card table-card">
+    <table>
+      <thead><tr><th class="shrink">Время</th><th>Кто</th><th>Действие</th><th>Детали</th></tr></thead>
+      <tbody>
+        {% for a in audit %}
+          <tr>
+            <td class="shrink muted mono">{{ a["ts"] | datetime }}</td>
+            <td>{{ a["username"] or "—" }}</td>
+            <td class="mono">{{ a["action"] }}</td>
+            <td class="muted">{{ a["details"] }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
 {% endblock %}

@@ -3,9 +3,25 @@
   var btn = document.getElementById("theme-toggle");
   if (!btn) return;
   btn.addEventListener("click", function () {
-    var cur = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
-    document.documentElement.setAttribute("data-theme", cur);
-    try { localStorage.setItem("theme", cur); } catch (e) {}
+    var next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("theme", next); } catch (e) {}
+    document.dispatchEvent(new CustomEvent("themechange"));
+  });
+})();
+
+// Копирование ссылки-приглашения
+(function () {
+  document.querySelectorAll(".copy").forEach(function (btn) {
+    var label = btn.querySelector("span");
+    btn.addEventListener("click", function () {
+      var url = new URL(btn.dataset.copy, location.origin).href;
+      navigator.clipboard.writeText(url).then(function () {
+        var was = label.textContent;
+        label.textContent = "скопировано";
+        setTimeout(function () { label.textContent = was; }, 1200);
+      }).catch(function () {});
+    });
   });
 })();
 
@@ -18,9 +34,16 @@
   var plan = document.getElementById("plan");
   var overlay = document.getElementById("overlay");
   var hint = document.getElementById("hint");
-  var ctx = overlay.getContext("2d");
+  var ctx = overlay ? overlay.getContext("2d") : null;
   var hit = null, hitCtx = null, hitData = null;
   var flats = {}, cache = {}, active = 0;
+
+  // цвет подсветки берём из палитры темы, чтобы план и интерфейс совпадали
+  function hlColor() {
+    var raw = getComputedStyle(document.documentElement).getPropertyValue("--hl-rgb");
+    var p = raw.trim().split(/[\s,]+/).map(Number);
+    return p.length === 3 && p.every(function (n) { return n >= 0 && n <= 255; }) ? p : [31, 111, 235];
+  }
 
   function loadHitmap() {
     var img = new Image();
@@ -43,6 +66,7 @@
 
   function silhouette(id) {
     if (cache[id]) return cache[id];
+    var rgb = hlColor();
     var c = document.createElement("canvas");
     c.width = hit.width; c.height = hit.height;
     var cc = c.getContext("2d");
@@ -50,7 +74,7 @@
     var d = img.data;
     for (var p = 0, q = 0; p < hitData.length; p += 4, q += 4) {
       if (hitData[p] === id) {
-        d[q] = 31; d[q + 1] = 111; d[q + 2] = 235; d[q + 3] = 64;
+        d[q] = rgb[0]; d[q + 1] = rgb[1]; d[q + 2] = rgb[2]; d[q + 3] = 66;
       }
     }
     cc.putImageData(img, 0, 0);
@@ -69,32 +93,41 @@
     if (el) el.classList.add("hl");
   }
 
-  plan.addEventListener("mousemove", function (e) {
-    if (!hitData) return;
-    var r = plan.getBoundingClientRect();
-    var x = (e.clientX - r.left) * hit.width / r.width;
-    var y = (e.clientY - r.top) * hit.height / r.height;
-    var id = idAt(x, y);
-    highlight(id);
-    var flat = flats[id];
-    if (flat) {
-      hint.textContent = flat.label + " — нажмите, чтобы скачать";
-      hint.style.left = (e.clientX - r.left) + "px";
-      hint.style.top = (e.clientY - r.top) + "px";
-      hint.style.display = "block";
-    } else {
-      hint.style.display = "none";
-    }
+  // при смене темы перерисовываем подсветку новым акцентом
+  document.addEventListener("themechange", function () {
+    cache = {};
+    if (!hitData || !active) return;
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    ctx.drawImage(silhouette(active), 0, 0);
   });
 
-  plan.addEventListener("mouseleave", function () { highlight(0); });
+  if (plan) {
+    plan.addEventListener("mousemove", function (e) {
+      if (!hitData) return;
+      var r = plan.getBoundingClientRect();
+      var x = (e.clientX - r.left) * hit.width / r.width;
+      var y = (e.clientY - r.top) * hit.height / r.height;
+      highlight(idAt(x, y));
+      var flat = flats[active];
+      if (flat) {
+        hint.textContent = flat.label + " — нажмите, чтобы скачать";
+        hint.style.left = (e.clientX - r.left) + "px";
+        hint.style.top = (e.clientY - r.top) + "px";
+        hint.style.display = "block";
+      } else {
+        hint.style.display = "none";
+      }
+    });
 
-  plan.addEventListener("click", function () {
-    var flat = flats[active];
-    if (!flat) return;
-    window.location = "/files/floors/" + floorId + "/apartments/" +
-      encodeURIComponent(flat.filename) + "?download=1";
-  });
+    plan.addEventListener("mouseleave", function () { highlight(0); });
+
+    plan.addEventListener("click", function () {
+      var flat = flats[active];
+      if (!flat) return;
+      window.location = "/files/floors/" + floorId + "/apartments/" +
+        encodeURIComponent(flat.filename) + "?download=1";
+    });
+  }
 
   function renderList(list) {
     flats = {};
@@ -106,9 +139,20 @@
       var el = document.createElement("div");
       el.className = "flat";
       el.dataset.idx = a.idx;
-      el.innerHTML = '<b>' + a.label + '</b><span class="spacer"></span>' +
-        '<a class="btn" href="/files/floors/' + floorId + '/apartments/' +
-        encodeURIComponent(a.filename) + '?download=1">Скачать</a>';
+
+      var name = document.createElement("b");
+      name.textContent = a.label;
+
+      var gap = document.createElement("span");
+      gap.className = "spacer";
+
+      var link = document.createElement("a");
+      link.className = "btn btn-sm";
+      link.href = "/files/floors/" + floorId + "/apartments/" +
+        encodeURIComponent(a.filename) + "?download=1";
+      link.textContent = "Скачать";
+
+      el.append(name, gap, link);
       el.addEventListener("mouseenter", function () { highlight(a.idx); });
       el.addEventListener("mouseleave", function () { highlight(0); });
       box.appendChild(el);
