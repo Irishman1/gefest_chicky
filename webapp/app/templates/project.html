@@ -93,7 +93,7 @@
           <div id="pick" class="pick" hidden>
             <b id="pick-label"></b>
             <button type="button" id="pick-edit" class="btn-sm primary">Редактировать</button>
-            <a id="pick-download" class="btn-sm">Скачать</a>
+            <a id="pick-download" class="btn btn-sm">Скачать</a>
             <button type="button" id="pick-close" class="btn-sm ghost icon-only" title="Закрыть">×</button>
           </div>
         </div>
@@ -102,6 +102,10 @@
         <button type="button" id="edit-toggle" class="btn-sm">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
           Править вручную
+        </button>
+        <button type="button" id="edit-stop" class="btn-sm ghost icon-only" hidden
+                title="Выйти из режима правки (Esc)" aria-label="Выйти из режима правки">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
         <span id="edit-hint" class="muted" hidden>
           Обводите помещение кликами по плану — минимум три точки. Двойной клик замыкает контур.

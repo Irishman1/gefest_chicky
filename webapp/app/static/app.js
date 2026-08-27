@@ -141,7 +141,7 @@
       highlight(idAt(x, y));
       var flat = flats[active];
       if (flat) {
-        hint.textContent = flat.label + " — нажмите, чтобы скачать";
+        hint.textContent = flat.label;
         hint.style.left = (e.clientX - r.left) + "px";
         hint.style.top = (e.clientY - r.top) + "px";
         hint.style.display = "block";
@@ -341,6 +341,7 @@
   }
 
   var toggle = document.getElementById("edit-toggle");
+  var stopBtn = document.getElementById("edit-stop");
   var editHint = document.getElementById("edit-hint");
   var addForm = document.getElementById("edit-add");
   var polyField = document.getElementById("edit-polygon");
@@ -348,7 +349,10 @@
 
   function drawPoints() {
     if (!ctx || !points.length) return;
-    var s = overlay.width;                       // контур храним в долях 0..1
+    // Холст растянут на план, поэтому в пикселях картинки точки росли вместе
+    // с приближением и закрывали то, по чему целишься. Считаем их в экранных
+    // пикселях: k — сколько пикселей холста приходится на один экранный.
+    var k = overlay.width / (plan.clientWidth || overlay.width);
     ctx.save();
     ctx.beginPath();
     points.forEach(function (p, i) {
@@ -356,17 +360,19 @@
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     if (points.length > 2) ctx.closePath();
-    ctx.fillStyle = "rgba(31,111,235,.18)";
+    ctx.fillStyle = "rgba(31,111,235,.16)";
     ctx.strokeStyle = "rgb(31,111,235)";
-    ctx.lineWidth = Math.max(s / 400, 2);
+    ctx.lineWidth = 1.5 * k;
     if (points.length > 2) ctx.fill();
     ctx.stroke();
-    points.forEach(function (p) {
+    points.forEach(function (p, i) {
       ctx.beginPath();
-      ctx.arc(p[0] * overlay.width, p[1] * overlay.height,
-              Math.max(s / 250, 4), 0, Math.PI * 2);
-      ctx.fillStyle = "rgb(31,111,235)";
+      ctx.arc(p[0] * overlay.width, p[1] * overlay.height, 3 * k, 0, Math.PI * 2);
+      // первая точка заметнее — по ней видно, где замкнётся контур
+      ctx.fillStyle = i === 0 ? "#fff" : "rgb(31,111,235)";
       ctx.fill();
+      ctx.lineWidth = 1.5 * k;
+      ctx.stroke();
     });
     ctx.restore();
   }
@@ -383,6 +389,7 @@
     }
     closePick();
     if (editHint) editHint.hidden = !on;
+    if (stopBtn) stopBtn.hidden = !on;
     if (addForm) addForm.hidden = true;
     if (toggle) {
       toggle.classList.toggle("primary", on);
@@ -399,6 +406,9 @@
 
     if (cancelBtn) {
       cancelBtn.addEventListener("click", function () { setEditing(true); });
+    }
+    if (stopBtn) {
+      stopBtn.addEventListener("click", function () { setEditing(false); });
     }
 
     plan.addEventListener("click", function (e) {
@@ -422,7 +432,7 @@
 
     document.addEventListener("keydown", function (e) {
       if (!editing) return;
-      if (e.key === "Escape") setEditing(true);
+      if (e.key === "Escape") setEditing(points.length ? true : false);
       if (e.key === "Backspace" && points.length) {
         e.preventDefault();
         points.pop();
@@ -459,6 +469,7 @@
     root.scrollTop = py * zoom - ay;
     root.classList.toggle("zoomed", zoom > 1);
     if (levelEl) levelEl.textContent = Math.round(zoom * 100) + "%";
+    paint();
   }
 
   function initZoom() {
