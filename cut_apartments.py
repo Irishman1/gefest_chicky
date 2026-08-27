@@ -43,7 +43,13 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 
 # Підпис квартири: "А-12.1", "К-3.15", "A-12,1". Перший символ може не
 # розпізнатись зі шрифту PDF (�) або бути прочитаний OCR як латиниця — не біда.
-LABEL_RE = re.compile(r"^\s*([^\s\-\u2013]{0,3})[\-\u2013\u2014](\d{1,3})[.,](\d{1,3})\s*$")
+# \u0427\u0430\u0441\u0442\u0438\u043d\u0430 \u043f\u0440\u043e\u0454\u043a\u0442\u0456\u0432 \u043f\u0438\u0448\u0435 \u043f\u0456\u0434\u043f\u0438\u0441 \u0431\u0435\u0437 \u0434\u0435\u0444\u0456\u0441\u0430: "\u04103.9", "\u041a 3.1". \u0422\u043e\u043c\u0443 \u0434\u0435\u0444\u0456\u0441
+# \u043d\u0435\u043e\u0431\u043e\u0432'\u044f\u0437\u043a\u043e\u0432\u0438\u0439, \u0430\u043b\u0435 \u0431\u0435\u0437 \u043d\u044c\u043e\u0433\u043e \u043b\u0456\u0442\u0435\u0440\u0430 \u043e\u0431\u043e\u0432'\u044f\u0437\u043a\u043e\u0432\u0430 \u2014 \u0456\u043d\u0430\u043a\u0448\u0435 \u043f\u0456\u0434 \u0448\u0430\u0431\u043b\u043e\u043d
+# \u043f\u043e\u043b\u0456\u0437\u0443\u0442\u044c \u043f\u043b\u043e\u0449\u0456 ("46,46").
+LABEL_RE = re.compile(
+    r"^\s*(?:(?P<dashed>[^\s\-\u2013\u2014]{0,3})\s*[\-\u2013\u2014]\s*"
+    r"|(?P<plain>[^\W\d_]{1,2})\s*)"
+    r"(?P<floor>\d{1,3})[.,](?P<num>\d{1,3})\s*$")
 # Some plans label an apartment as bare "24.1" (no letter, no dash) - the same
 # shape as an area figure ("39.72"). We tell a bare label apart by font size:
 # it is always noticeably larger than the area numbers printed under it.
@@ -105,7 +111,8 @@ def parse_label(text, prefix):
     m = LABEL_RE.match(text)
     if not m:
         return None
-    letter, floor, num = m.groups()
+    letter = m.group("dashed") or m.group("plain") or ""
+    floor, num = m.group("floor"), m.group("num")
     letter = "".join(ch for ch in letter if ch.isalnum() and ch != "\ufffd")
     if not letter or letter.isdigit():
         letter = prefix
@@ -477,8 +484,14 @@ def find_tesseract(explicit=None):
 
 
 # у результатах OCR підпис часто злипається зі сміттям: "A-12.2 «", "A- 12.151"
+# Дефіс необов'язковий ("А3.9"), але без нього літера обов'язкова. Хвіст
+# "м²" відсікає площі: осі на кресленні підписані літерами (А, Б, В...), і
+# без цієї перевірки OCR склеїв би вісь із сусідньою площею — "В 13,50 м²".
 OCR_LABEL_RE = re.compile(
-    r"(?<![\d,.])([A-ZА-ЯЇІЄҐ]?)\s*[-–—]\s*(\d{1,3})\s*[.,]\s*(\d{1,3})(?![\d,.])")
+    r"(?<![\d,.])"
+    r"(?:([A-ZА-ЯЇІЄҐ])\s*[-–—]?|[-–—])\s*"
+    r"(\d{1,3})\s*[.,]\s*(\d{1,3})"
+    r"(?![\d,.])(?!\s*[мmМM]\s*[²2])")
 
 
 def clean_for_ocr(img: Image.Image, px_per_pt: float) -> Image.Image:
