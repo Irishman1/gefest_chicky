@@ -44,6 +44,18 @@ def file_name(project_name: str, floor: int | str, number: str, ext: str = ".png
     return f"{safe_part(project_name)}_{safe_part(floor)}_{safe_part(number)}{ext}"
 
 
+THUMB_MAX = 360           # длинная сторона миниатюры вырезки
+
+
+def make_thumb(src: Path, dst_dir: Path) -> None:
+    """Кладёт рядом уменьшенную копию — список этажа грузит её, а не полный PNG."""
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    with Image.open(src) as im:
+        im = im.copy()
+    im.thumbnail((THUMB_MAX, THUMB_MAX), Image.LANCZOS)
+    im.save(dst_dir / src.name, optimize=True)
+
+
 def _polygon_mask(points, width: int, height: int) -> np.ndarray:
     """Контур в долях 0..1 -> булева маска нужного размера."""
     pts = [(float(x) * width, float(y) * height) for x, y in points]
@@ -73,6 +85,7 @@ def apply_edits(pdf_path: Path, out_dir: Path, project_name: str, floor_number: 
 
     apt_dir = out_dir / "apartments"
     apt_dir.mkdir(parents=True, exist_ok=True)
+    thumb_dir = out_dir / "thumbs"
     hit_path = out_dir / "hitmap.png"
     hit = (np.asarray(Image.open(hit_path).convert("L")).copy()
            if hit_path.exists() else None)
@@ -91,6 +104,7 @@ def apply_edits(pdf_path: Path, out_dir: Path, project_name: str, floor_number: 
                 if rec is None:
                     continue
                 (apt_dir / rec["filename"]).unlink(missing_ok=True)
+                (thumb_dir / rec["filename"]).unlink(missing_ok=True)
                 if hit is not None:
                     hit[hit == rec["idx"]] = 0
                 records.remove(rec)
@@ -105,6 +119,9 @@ def apply_edits(pdf_path: Path, out_dir: Path, project_name: str, floor_number: 
                 old = apt_dir / rec["filename"]
                 if old.exists():
                     old.replace(apt_dir / new_name)
+                old_thumb = thumb_dir / rec["filename"]
+                if old_thumb.exists():
+                    old_thumb.replace(thumb_dir / new_name)
                 by_number.pop(target, None)
                 rec["number"], rec["label"], rec["filename"] = number, number, new_name
                 by_number[number] = rec
@@ -124,6 +141,7 @@ def apply_edits(pdf_path: Path, out_dir: Path, project_name: str, floor_number: 
                                          pad_px, bg, quality):
                     note(f"      ручной контур {number}: пустая область, пропущено")
                     continue
+                make_thumb(apt_dir / name, thumb_dir)
                 idx = max((r["idx"] for r in records), default=0) + 1
                 if hit is not None:
                     small = np.asarray(Image.fromarray(mask).resize(
@@ -164,6 +182,8 @@ def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: in
     if apt_dir.exists():
         shutil.rmtree(apt_dir)
     apt_dir.mkdir(parents=True, exist_ok=True)
+    if (out_dir / "thumbs").exists():
+        shutil.rmtree(out_dir / "thumbs")
 
     # Тип объекта задаёт пользователь при создании проекта. Жильё и офисы
     # устроены по-разному: у квартир границу держат стены, у офисов —
@@ -218,6 +238,7 @@ def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: in
             if not saved:
                 say(f"      {apt.label}: пустая маска, пропущено")
                 continue
+            make_thumb(apt_dir / name, out_dir / "thumbs")
 
             small = np.asarray(Image.fromarray(mask).resize(
                 (preview.width, preview.height), Image.NEAREST))

@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import math
 import os
 import re
 import shutil
@@ -428,53 +429,134 @@ def _cluster_topleft(items, max_dx=8.0, max_dy=20.0):
     return out
 
 
-def _labels_from_leaders(page, numbered, prefix, reach=260.0, max_marker=6.0):
-    """
-    Office-style plans: the number sits OUTSIDE the room, in a little box in
-    the margin, joined to the room by a leader line that ends in a small
-    circle drawn inside the room. The number's own position is therefore
-    useless for finding the room - what matters is where its leader ends.
-
-    Find, for each number, the nearest small circle within a corridor
-    extending from the label towards the plan, and use that circle's centre
-    as the label point.
-    """
-    markers = []
+def _leader_segments(page, min_len: float):
+    """Прямі відрізки креслення, довші за min_len — серед них і виноски."""
+    segs = []
     for dr in page_drawings(page):
-        r = dr["rect"]
-        if dr["type"] != "s" or r.width > max_marker or r.height > max_marker:
-            continue
-        if not any(it[0] == "c" for it in dr["items"]):
-            continue
-        markers.append(fitz.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2))
-    if not markers:
-        return []
+        for it in dr["items"]:
+            if it[0] != "l":
+                continue
+            a, b = it[1], it[2]
+            if math.hypot(b.x - a.x, b.y - a.y) >= min_len:
+                segs.append((a, b))
+    return segs
 
+
+def _follow_leader(bbox, segs, reach: float, gap: float, inward, hops: int = 3):
+    """
+    Веде від рамки з номером уздовж виноски до її кінця в приміщенні.
+
+    Виноска — найдовший відрізок, що починається впритул до рамки й іде від
+    неї геть. Далі, якщо вона ламана, підхоплюємо продовження: наступний
+    відрізок, що починається з кінця попереднього й веде ще далі.
+
+    inward — припустимі напрямки від рамки всередину креслення. Довжини самої
+    замало: повз рамку проходять розмірні лінії, довші за виноску, але
+    спрямовані вздовж краю аркуша. Тому відрізок оцінюємо довжиною, помноженою
+    на те, наскільки він дивиться всередину.
+    """
+    cx, cy = (bbox.x0 + bbox.x1) / 2, (bbox.y0 + bbox.y1) / 2
+    near = fitz.Rect(bbox.x0 - gap, bbox.y0 - gap, bbox.x1 + gap, bbox.y1 + gap)
+
+    best, best_score = None, 0.0
+    for a, b in segs:
+        for p1, p2 in ((a, b), (b, a)):
+            if not near.contains(p1) or near.contains(p2):
+                continue
+            if math.hypot(p2.x - cx, p2.y - cy) > reach:
+                continue
+            length = math.hypot(p2.x - p1.x, p2.y - p1.y)
+            ux, uy = (p2.x - p1.x) / length, (p2.y - p1.y) / length
+            towards = max(ux * dx + uy * dy for dx, dy in inward)
+            if towards <= 0.3:                     # вздовж краю — це не виноска
+                continue
+            score = length * towards
+            if score > best_score:
+                best, best_score = (p1, p2), score
+    if best is None:
+        return None
+
+    tip = best[1]
+    prev = best[0]
+    for _ in range(hops):
+        step = None
+        for a, b in segs:
+            for p1, p2 in ((a, b), (b, a)):
+                if math.hypot(p1.x - tip.x, p1.y - tip.y) > 2.0:
+                    continue
+                if math.hypot(p2.x - prev.x, p2.y - prev.y) <= math.hypot(tip.x - prev.x, tip.y - prev.y):
+                    continue                       # назад не йдемо
+                if math.hypot(p2.x - cx, p2.y - cy) > reach:
+                    continue
+                length = math.hypot(p2.x - p1.x, p2.y - p1.y)
+                if step is None or length > step[1]:
+                    step = (p2, length)
+        if step is None:
+            break
+        prev, tip = tip, step[0]
+
+    # кінець виноски лежить на стіні приміщення — трохи зсуваємось усередину
+    dx, dy = tip.x - prev.x, tip.y - prev.y
+    d = math.hypot(dx, dy) or 1.0
+    return fitz.Point(tip.x + dx / d * 8.0, tip.y + dy / d * 8.0)
+
+
+def _numbered_boxes(page):
+    """
+    Невеликі намальовані прямокутники — рамки, у які виносять номери приміщень.
+
+    Номер без рамки — не підпис приміщення, а стороння позначка на полях
+    (на одному з планів так підписано «№4» біля рози вітрів). Якщо його не
+    відсіяти, він хапає першу-ліпшу довгу лінію замість виноски й забирає зону
+    в сусіда, у якого підпис справжній.
+    """
     out = []
-    used = set()
-    for num, bbox in numbered:
-        cx = (bbox.x0 + bbox.x1) / 2
-        cy = (bbox.y0 + bbox.y1) / 2
-        best, best_d = None, None
-        for i, m in enumerate(markers):
-            if i in used:
-                continue
-            # leader lines run straight out of the label box, so stay in a
-            # narrow column (or row) aligned with the label
-            if abs(m.x - cx) > bbox.width * 1.5 + 6:
-                continue
-            dist = abs(m.y - cy)
-            if dist > reach:
-                continue
-            if best_d is None or dist < best_d:
-                best, best_d, best_i = m, dist, i
-        if best is None:
+    for dr in page_drawings(page):
+        if dr["type"] not in ("s", "f", "fs"):
             continue
-        used.add(best_i)
-        # The marker sits on the room's wall, not inside it - step further
-        # along the leader so the point lands in the room's own fill.
-        step = 12.0 if best.y >= cy else -12.0
-        out.append(Apartment(f"{prefix}-{num}", "", num, (best.x, best.y + step)))
+        r = dr["rect"]
+        if 8 < r.width < 140 and 8 < r.height < 90:
+            out.append(r)
+    return out
+
+
+def _labels_from_leaders(page, numbered, prefix, reach=280.0, min_len=10.0,
+                         gap=26.0):
+    """
+    Офісні плани: номер стоїть не в приміщенні, а в рамці на полях аркуша й
+    з'єднаний із приміщенням виноскою. Тому важлива не позиція самого номера,
+    а те, куди приходить його виноска.
+
+    Раніше кінець виноски шукали як найближче маленьке коло — але на офісному
+    кресленні таких кіл сотні (спинки крісел, сантехніка), і виноска раз у раз
+    чіплялася за меблі. Тепер ідемо по самій лінії.
+    """
+    segs = _leader_segments(page, min_len)
+    if not segs:
+        return []
+    frames = _numbered_boxes(page)
+    numbered = [(n, b) for n, b in numbered
+                if any(f.contains(b) and f.get_area() <= b.get_area() * 14
+                       for f in frames)]
+    if not numbered:
+        return []
+    # «Всередину» — від того краю аркуша, біля якого стоїть рамка: номери
+    # виносять на поля, тож виноска йде від краю в бік креслення. У кутку
+    # аркуша два краї майже рівновіддалені, і вибір одного з них навмання
+    # відкидає справжню виноску — тому беремо всі близькі.
+    prect = page.rect          # PyMuPDF уже віддає її з урахуванням повороту
+    out = []
+    for num, bbox in numbered:
+        cx, cy = (bbox.x0 + bbox.x1) / 2, (bbox.y0 + bbox.y1) / 2
+        sides = sorted(((cy - prect.y0, (0.0, 1.0)), (prect.y1 - cy, (0.0, -1.0)),
+                        (cx - prect.x0, (1.0, 0.0)), (prect.x1 - cx, (-1.0, 0.0))),
+                       key=lambda t: t[0])
+        limit = sides[0][0] * 1.6
+        inward = [d for dist, d in sides if dist <= limit][:2]
+        tip = _follow_leader(bbox, segs, reach, gap, inward)
+        if tip is None:
+            continue
+        out.append(Apartment(f"{prefix}-{num}", "", num, (tip.x, tip.y)))
     return out
 
 

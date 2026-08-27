@@ -74,6 +74,13 @@
       <p class="lede" style="margin-top:14px">
         Наведите на {{ "офис" if project["kind"] == "offices" else "квартиру" }} — {{ "он подсветится" if project["kind"] == "offices" else "она подсветится" }}. Нажмите, чтобы скачать.
       </p>
+      <div class="zoom-bar">
+        <button type="button" class="btn-sm" data-zoom="out" title="Отдалить">−</button>
+        <span id="zoom-level" class="mono">100%</span>
+        <button type="button" class="btn-sm" data-zoom="in" title="Приблизить">+</button>
+        <button type="button" class="btn-sm ghost" data-zoom="fit">По ширине</button>
+        <span class="muted">колесо с Ctrl — масштаб, перетаскивание правой кнопкой — сдвиг</span>
+      </div>
       <div id="viewer" class="viewer" data-floor="{{ floor['id'] }}"
            data-status="{{ floor['status'] }}"
            data-project="{{ project['id'] }}"

@@ -144,19 +144,35 @@
       el.className = "flat";
       el.dataset.idx = a.idx;
 
+      // миниатюра самой вырезки — видно, что получилось, не открывая файл
+      var shot = document.createElement("a");
+      shot.className = "flat-shot";
+      shot.href = "/files/floors/" + floorId + "/apartments/" +
+        encodeURIComponent(a.filename);
+      shot.target = "_blank";
+      shot.title = "Открыть вырезку целиком";
+      var img = document.createElement("img");
+      img.loading = "lazy";
+      img.alt = a.label;
+      img.src = "/files/floors/" + floorId + "/thumbs/" +
+        encodeURIComponent(a.filename);
+      shot.appendChild(img);
+
+      var head = document.createElement("div");
+      head.className = "flat-head";
       var name = document.createElement("b");
       name.textContent = a.label;
-
       var gap = document.createElement("span");
       gap.className = "spacer";
+      head.append(name, gap, renameBtn(a), redrawBtn(a), deleteBtn(a));
 
       var link = document.createElement("a");
-      link.className = "btn btn-sm";
+      link.className = "btn btn-sm btn-block";
       link.href = "/files/floors/" + floorId + "/apartments/" +
         encodeURIComponent(a.filename) + "?download=1";
       link.textContent = "Скачать";
 
-      el.append(name, gap, link, renameBtn(a), deleteBtn(a));
+      el.append(shot, head, link);
       el.addEventListener("mouseenter", function () { highlight(a.idx); });
       el.addEventListener("mouseleave", function () { highlight(0); });
       box.appendChild(el);
@@ -217,6 +233,20 @@
     b.addEventListener("click", function (ev) {
       ev.stopPropagation();
       if (!window.confirm("Удалить " + a.label + " из нарезки?")) return;
+      post(editUrl("delete"), { target: a.number });
+    });
+    return b;
+  }
+
+  function redrawBtn(a) {
+    var b = iconBtn("Перерисовать контур",
+      '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>');
+    b.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      if (!window.confirm("Удалить контур " + a.label +
+                          " и обвести заново?")) return;
+      // номер переживает удаление: подставим его в форму после перезагрузки
+      try { sessionStorage.setItem("redraw-" + floorId, a.number); } catch (e) {}
       post(editUrl("delete"), { target: a.number });
     });
     return b;
@@ -309,6 +339,102 @@
       }
     });
   }
+
+  // ---------------------------------------------------------------- масштаб
+  // План растягиваем шириной самой картинки, а контейнер прокручиваем. Все
+  // координаты и наведение, и обводка считают через getBoundingClientRect,
+  // поэтому от масштаба не зависят.
+  var zoom = 1, fitWidth = 0;
+  var levelEl = document.getElementById("zoom-level");
+
+  function applyZoom(next, anchorX, anchorY) {
+    if (!plan || !fitWidth) return;
+    next = Math.min(Math.max(next, 1), 8);
+    if (next === zoom) return;
+
+    var r = root.getBoundingClientRect();
+    var ax = anchorX === undefined ? r.width / 2 : anchorX;
+    var ay = anchorY === undefined ? r.height / 2 : anchorY;
+    var px = (root.scrollLeft + ax) / zoom;        // точка под курсором
+    var py = (root.scrollTop + ay) / zoom;
+
+    zoom = next;
+    plan.style.maxWidth = "none";
+    plan.style.width = Math.round(fitWidth * zoom) + "px";
+
+    root.scrollLeft = px * zoom - ax;
+    root.scrollTop = py * zoom - ay;
+    root.classList.toggle("zoomed", zoom > 1);
+    if (levelEl) levelEl.textContent = Math.round(zoom * 100) + "%";
+  }
+
+  function initZoom() {
+    if (!plan) return;
+    fitWidth = plan.clientWidth;
+    if (levelEl) levelEl.textContent = "100%";
+  }
+
+  // возвращаемся после «перерисовать»: сразу режим обводки с тем же номером
+  try {
+    var pending = sessionStorage.getItem("redraw-" + floorId);
+    if (pending) {
+      sessionStorage.removeItem("redraw-" + floorId);
+      setEditing(true);
+      var pf = document.getElementById("edit-flat");
+      if (pf) pf.value = pending;
+    }
+  } catch (e) {}
+
+  if (plan) {
+    if (plan.complete) initZoom();
+    else plan.addEventListener("load", initZoom);
+  }
+
+  document.querySelectorAll("[data-zoom]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var what = b.dataset.zoom;
+      if (what === "in") applyZoom(zoom * 1.4);
+      else if (what === "out") applyZoom(zoom / 1.4);
+      else {
+        zoom = 1.0001;                             // чтобы applyZoom не отбросил
+        applyZoom(1);
+        plan.style.width = "";
+        plan.style.maxWidth = "";
+        root.scrollLeft = root.scrollTop = 0;
+        root.classList.remove("zoomed");
+        if (levelEl) levelEl.textContent = "100%";
+      }
+    });
+  });
+
+  root.addEventListener("wheel", function (e) {
+    if (!e.ctrlKey || !fitWidth) return;
+    e.preventDefault();
+    var r = root.getBoundingClientRect();
+    applyZoom(zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15),
+              e.clientX - r.left, e.clientY - r.top);
+  }, { passive: false });
+
+  // сдвиг правой кнопкой — левая занята обводкой
+  var pan = null;
+  root.addEventListener("contextmenu", function (e) {
+    if (zoom > 1) e.preventDefault();
+  });
+  root.addEventListener("mousedown", function (e) {
+    if (e.button !== 2 || zoom <= 1) return;
+    e.preventDefault();
+    pan = { x: e.clientX, y: e.clientY, l: root.scrollLeft, t: root.scrollTop };
+    root.classList.add("panning");
+  });
+  document.addEventListener("mousemove", function (e) {
+    if (!pan) return;
+    root.scrollLeft = pan.l - (e.clientX - pan.x);
+    root.scrollTop = pan.t - (e.clientY - pan.y);
+  });
+  document.addEventListener("mouseup", function () {
+    pan = null;
+    root.classList.remove("panning");
+  });
 
   var statusEl = document.getElementById("floor-status");
   var busy = root.dataset.status === "queued" || root.dataset.status === "working";

@@ -22,6 +22,11 @@ def apartments_dir(project_id: int, floor_id: int) -> Path:
     return floor_dir(project_id, floor_id) / "apartments"
 
 
+def thumbs_dir(project_id: int, floor_id: int) -> Path:
+    """Уменьшенные копии вырезок — чтобы список этажа не тянул полные PNG."""
+    return floor_dir(project_id, floor_id) / "thumbs"
+
+
 def ensure(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path

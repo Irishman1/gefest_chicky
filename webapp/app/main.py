@@ -25,7 +25,7 @@ from . import db, jobs, security
 # по-русски и по-украински, и отказ по «только латиница» их стопорил.
 USERNAME_RE = re.compile(r"^[a-zA-Zа-яА-ЯёЁіІїЇєЄґҐ0-9_.\-]{3,32}$")
 from .cutter import apply_edits, safe_part
-from .storage import apartments_dir, ensure, floor_dir, project_dir
+from .storage import apartments_dir, ensure, floor_dir, project_dir, thumbs_dir
 
 BASE = Path(__file__).resolve().parent
 MAX_PDF_MB = int(os.environ.get("MAX_PDF_MB", "40"))
@@ -488,6 +488,24 @@ def apartment_file(floor_id: int, name: str, request: Request, download: int = 0
         return FileResponse(path, filename=row["filename"],
                             media_type="application/octet-stream")
     return FileResponse(path)
+
+
+@app.get("/files/floors/{floor_id}/thumbs/{name}")
+def apartment_thumb(floor_id: int, name: str, request: Request,
+                    user=Depends(require_user)):
+    """Миниатюра вырезки для списка этажа; если её нет — отдаём полный файл."""
+    floor = get_floor(floor_id, user)
+    row = db.one("SELECT * FROM apartments WHERE floor_id=? AND filename=?",
+                 (floor_id, name))
+    if not row:
+        raise HTTPException(404, "Квартира не найдена")
+    small = thumbs_dir(floor["pid"], floor_id) / row["filename"]
+    if small.exists():
+        return FileResponse(small)
+    full = apartments_dir(floor["pid"], floor_id) / row["filename"]
+    if not full.exists():
+        raise HTTPException(404, "Файл не найден")
+    return FileResponse(full)
 
 
 def content_disposition(filename: str) -> str:
