@@ -76,6 +76,8 @@
       </p>
       <div id="viewer" class="viewer" data-floor="{{ floor['id'] }}"
            data-status="{{ floor['status'] }}"
+           data-project="{{ project['id'] }}"
+           data-floor-number="{{ floor['number'] }}"
            data-flats='{{ flats_json | tojson }}'>
         <div class="viewer-inner">
           <img id="plan" src="/files/floors/{{ floor['id'] }}/preview.png" alt="План этажа {{ floor['number'] }}">
@@ -83,6 +85,31 @@
           <div id="hint" class="hint"></div>
         </div>
       </div>
+      <div class="edit-bar">
+        <button type="button" id="edit-toggle" class="btn-sm">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          Править вручную
+        </button>
+        <span id="edit-hint" class="muted" hidden>
+          Обводите помещение кликами по плану — минимум три точки. Двойной клик замыкает контур.
+        </span>
+
+        <form id="edit-add" method="post" hidden
+              action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/edits/add">
+          <input type="hidden" name="polygon" id="edit-polygon">
+          <input type="text" name="flat" id="edit-flat" required autocomplete="off"
+                 placeholder="номер, напр. {{ apartments[0]['number'] if apartments else '1' }}">
+          <button class="primary btn-sm" type="submit">Сохранить контур</button>
+          <button type="button" class="btn-sm ghost" id="edit-cancel">Отмена</button>
+        </form>
+
+        <span class="spacer"></span>
+        <form method="post" action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/edits/reset"
+              onsubmit="return confirm('Сбросить все ручные правки этого этажа и порезать заново?')">
+          <button class="btn-sm ghost danger" type="submit">Сбросить правки</button>
+        </form>
+      </div>
+
       <div id="flat-list" class="flats"></div>
 
     {% elif floor["status"] in ("queued", "working") %}

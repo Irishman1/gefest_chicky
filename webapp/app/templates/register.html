@@ -23,7 +23,9 @@
         <div class="f">
           <label for="u">Логин</label>
           <input id="u" type="text" name="username" value="{{ username or '' }}" required
-                 pattern="[a-zA-Z0-9_.\-]{3,32}" autocomplete="username">
+                 pattern="[a-zA-Zа-яА-ЯёЁіІїЇєЄґҐ0-9_.\-]{3,32}"
+                 title="3–32 символа: буквы, цифры, точка, дефис, подчёркивание"
+                 autocomplete="username">
         </div>
         <div class="f">
           <label for="p">Пароль <span class="muted">— от 8 символов</span></label>

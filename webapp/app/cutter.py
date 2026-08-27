@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import unicodedata
@@ -18,7 +19,7 @@ from pathlib import Path
 
 import fitz
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -43,9 +44,113 @@ def file_name(project_name: str, floor: int | str, number: str, ext: str = ".png
     return f"{safe_part(project_name)}_{safe_part(floor)}_{safe_part(number)}{ext}"
 
 
+def _polygon_mask(points, width: int, height: int) -> np.ndarray:
+    """Контур в долях 0..1 -> булева маска нужного размера."""
+    pts = [(float(x) * width, float(y) * height) for x, y in points]
+    img = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(img).polygon(pts, fill=255)
+    return np.asarray(img) > 0
+
+
+def apply_edits(pdf_path: Path, out_dir: Path, project_name: str, floor_number: int,
+                records: list, edits: list, dpi: int = 300, bg: str = "white",
+                quality: int = 95, padding_pt: float = 6.0, say=None) -> list:
+    """
+    Накладывает ручные правки поверх нарезки.
+
+    Вызывается дважды: сразу после правки на сайте (быстро — сегментация не
+    переделывается, только рендер страницы) и заново в конце автонарезки, чтобы
+    «порезать заново» не стирало ручную работу.
+
+    records меняется на месте и возвращается.
+    """
+    def note(msg):
+        if say:
+            say(msg)
+
+    if not edits:
+        return records
+
+    apt_dir = out_dir / "apartments"
+    apt_dir.mkdir(parents=True, exist_ok=True)
+    hit_path = out_dir / "hitmap.png"
+    hit = (np.asarray(Image.open(hit_path).convert("L")).copy()
+           if hit_path.exists() else None)
+
+    doc = fitz.open(pdf_path)
+    base_img = None
+    try:
+        page = doc[0]
+        by_number = {r["number"]: r for r in records}
+
+        for e in edits:
+            action, target, number = e["action"], e["target"], e["number"]
+
+            if action == "delete":
+                rec = by_number.pop(target, None)
+                if rec is None:
+                    continue
+                (apt_dir / rec["filename"]).unlink(missing_ok=True)
+                if hit is not None:
+                    hit[hit == rec["idx"]] = 0
+                records.remove(rec)
+                note(f"      удалено вручную: {rec['label']}")
+
+            elif action == "rename":
+                rec = by_number.get(target)
+                if rec is None:
+                    continue
+                new_name = file_name(project_name, floor_number, number,
+                                     Path(rec["filename"]).suffix)
+                old = apt_dir / rec["filename"]
+                if old.exists():
+                    old.replace(apt_dir / new_name)
+                by_number.pop(target, None)
+                rec["number"], rec["label"], rec["filename"] = number, number, new_name
+                by_number[number] = rec
+                note(f"      переименовано вручную: {target} -> {number}")
+
+            elif action == "add":
+                points = json.loads(e["polygon"] or "[]")
+                if len(points) < 3:
+                    continue
+                if base_img is None:
+                    base_img = ca.page_to_image(page, dpi)
+                mask = _polygon_mask(points, base_img.width, base_img.height)
+                ext = ca.ext_for(bg)
+                name = file_name(project_name, floor_number, number, ext)
+                pad_px = max(int(round(padding_pt * dpi / 72.0)), 0)
+                if not ca.save_apartment(base_img, mask, apt_dir / name,
+                                         pad_px, bg, quality):
+                    note(f"      ручной контур {number}: пустая область, пропущено")
+                    continue
+                idx = max((r["idx"] for r in records), default=0) + 1
+                if hit is not None:
+                    small = np.asarray(Image.fromarray(mask).resize(
+                        (hit.shape[1], hit.shape[0]), Image.NEAREST))
+                    hit[small] = idx
+                    ys, xs = np.nonzero(small)
+                    box = ((float(xs.min()), float(ys.min()),
+                            float(xs.max()), float(ys.max()))
+                           if xs.size else (0.0, 0.0, 0.0, 0.0))
+                else:
+                    box = (0.0, 0.0, 0.0, 0.0)
+                rec = {"idx": idx, "label": number, "number": number,
+                       "filename": name, "box": box, "manual": True}
+                records.append(rec)
+                by_number[number] = rec
+                note(f"      добавлено вручную: {number}")
+    finally:
+        doc.close()
+
+    if hit is not None:
+        Image.fromarray(hit, mode="L").save(hit_path, optimize=True)
+    return records
+
+
 def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: int,
               log=None, dpi: int = 300, bg: str = "white",
-              kind: str = "flats") -> dict:
+              kind: str = "flats", edits: list | None = None) -> dict:
     """Режет первую страницу PDF. Возвращает данные для базы."""
     lines: list[str] = []
 
@@ -125,6 +230,14 @@ def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: in
             say(f"      {apt.label} -> {name}")
 
         Image.fromarray(hit, mode="L").save(out_dir / "hitmap.png", optimize=True)
+
+        # Ручные правки накладываем поверх свежей автонарезки — «порезать
+        # заново» не должно стирать то, что человек доделал руками.
+        if edits:
+            records = apply_edits(pdf_path, out_dir, project_name, floor_number,
+                                  records, edits, dpi=dpi, bg=bg,
+                                  quality=args.quality, padding_pt=args.padding,
+                                  say=say)
 
         if info["missing"]:
             say("      без заливки (не вырезаны): " + ", ".join(info["missing"]))

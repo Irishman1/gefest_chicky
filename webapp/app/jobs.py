@@ -75,8 +75,11 @@ def _run(floor_id: int) -> None:
                "WHERE id=?", (db.now(), floor_id))
     log.info("Нарезка: проект %s, этаж %s", floor["project_name"], floor["number"])
 
+    edits = [dict(r) for r in db.query(
+        "SELECT action, target, number, polygon FROM floor_edits "
+        "WHERE floor_id=? ORDER BY id", (floor_id,))]
     result = cut_floor(pdf, d, floor["project_name"], floor["number"],
-                       kind=floor["project_kind"] or "flats")
+                       kind=floor["project_kind"] or "flats", edits=edits)
 
     db.execute("DELETE FROM apartments WHERE floor_id=?", (floor_id,))
     if result["ok"]:

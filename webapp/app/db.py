@@ -68,6 +68,19 @@ CREATE TABLE IF NOT EXISTS apartments (
     x0 REAL, y0 REAL, x1 REAL, y1 REAL          -- рамка в координатах превью
 );
 
+-- Ручные правки нарезки. Живут отдельно от результата и накладываются
+-- поверх него заново после каждой автонарезки — иначе «порезать заново»
+-- стирало бы всю ручную работу.
+CREATE TABLE IF NOT EXISTS floor_edits (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    floor_id   INTEGER NOT NULL REFERENCES floors(id) ON DELETE CASCADE,
+    action     TEXT NOT NULL,                  -- add | rename | delete
+    target     TEXT NOT NULL DEFAULT '',       -- к какому номеру относится
+    number     TEXT NOT NULL DEFAULT '',       -- новый номер (add/rename)
+    polygon    TEXT NOT NULL DEFAULT '',       -- JSON [[x,y]...] в долях 0..1
+    created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     ts       INTEGER NOT NULL,

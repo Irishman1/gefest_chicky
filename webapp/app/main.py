@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 import logging.handlers
@@ -20,8 +21,10 @@ from urllib.parse import quote
 
 from . import db, jobs, security
 
-USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]{3,32}$")
-from .cutter import safe_part
+# Логин: латиница ИЛИ кириллица, цифры и . _ - — люди пишут своё имя
+# по-русски и по-украински, и отказ по «только латиница» их стопорил.
+USERNAME_RE = re.compile(r"^[a-zA-Zа-яА-ЯёЁіІїЇєЄґҐ0-9_.\-]{3,32}$")
+from .cutter import apply_edits, safe_part
 from .storage import apartments_dir, ensure, floor_dir, project_dir
 
 BASE = Path(__file__).resolve().parent
@@ -186,10 +189,12 @@ def register(request: Request, code: str = Form(...), username: str = Form(...),
                     error="Код приглашения неверный или уже использован")
     if invite["username"] and invite["username"].strip().lower() != username:
         return page(request, "register.html", code=code, username=username,
-                    error="Это приглашение выписано на другой логин")
+                    error=f"Это приглашение выписано на логин «{invite['username']}» — "
+                          f"введите именно его")
     if not USERNAME_RE.match(username):
         return page(request, "register.html", code=code, username=username,
-                    error="Логин: 3–32 символа, латиница, цифры, точка, дефис, подчёркивание")
+                    error="Логин: 3–32 символа — буквы (латиница или кириллица), "
+                          "цифры, точка, дефис, подчёркивание")
     if len(password) < 8:
         return page(request, "register.html", code=code, username=username,
                     error="Пароль должен быть не короче 8 символов")
@@ -321,6 +326,113 @@ def recut(project_id: int, number: int, request: Request, user=Depends(require_u
         raise HTTPException(400, "Сначала загрузите PDF")
     jobs.enqueue(floor["id"])
     db.log_action(user, "floor.recut", f"{proj['name']} эт.{number}")
+    return RedirectResponse(f"/projects/{project_id}?floor={number}", status_code=303)
+
+
+# ------------------------------------------------------- ручная правка нарезки
+def _floor_for_edit(project_id: int, number: int, user):
+    proj = get_project(project_id, user)
+    floor = db.one("SELECT * FROM floors WHERE project_id=? AND number=?",
+                   (project_id, number))
+    if not floor:
+        raise HTTPException(404, "Этаж не найден")
+    d = floor_dir(project_id, floor["id"])
+    if not (d / "source.pdf").exists():
+        raise HTTPException(400, "Сначала загрузите PDF")
+    return proj, floor, d
+
+
+def _records_of(floor_id: int) -> list:
+    return [{"idx": r["idx"], "label": r["label"], "number": r["number"],
+             "filename": r["filename"], "box": (r["x0"], r["y0"], r["x1"], r["y1"])}
+            for r in db.query("SELECT * FROM apartments WHERE floor_id=? ORDER BY idx",
+                              (floor_id,))]
+
+
+def _save_records(floor_id: int, records: list) -> None:
+    db.execute("DELETE FROM apartments WHERE floor_id=?", (floor_id,))
+    for rec in records:
+        x0, y0, x1, y1 = rec["box"]
+        db.execute("INSERT INTO apartments (floor_id, idx, label, number, filename, "
+                   "x0, y0, x1, y1) VALUES (?,?,?,?,?,?,?,?,?)",
+                   (floor_id, rec["idx"], rec["label"], rec["number"],
+                    rec["filename"], x0, y0, x1, y1))
+
+
+def _apply_one(proj, floor, d, edit: dict, user, what: str):
+    """Пишет правку в журнал правок и сразу накладывает её на файлы этажа."""
+    db.execute("INSERT INTO floor_edits (floor_id, action, target, number, polygon, "
+               "created_at) VALUES (?,?,?,?,?,?)",
+               (floor["id"], edit["action"], edit["target"], edit["number"],
+                edit["polygon"], db.now()))
+    records = _records_of(floor["id"])
+    records = apply_edits(d / "source.pdf", d, proj["name"], floor["number"],
+                          records, [edit])
+    _save_records(floor["id"], records)
+    db.execute("UPDATE floors SET message=?, updated_at=? WHERE id=?",
+               (f"Готово: {len(records)}", db.now(), floor["id"]))
+    db.log_action(user, f"floor.edit.{edit['action']}",
+                  f"{proj['name']} эт.{floor['number']}: {what}")
+
+
+@app.post("/projects/{project_id}/floors/{number}/edits/add")
+def edit_add(project_id: int, number: int, request: Request,
+             flat: str = Form(...), polygon: str = Form(...),
+             user=Depends(require_user)):
+    proj, floor, d = _floor_for_edit(project_id, number, user)
+    flat = flat.strip()
+    if not flat:
+        raise HTTPException(400, "Укажите номер")
+    try:
+        points = json.loads(polygon)
+    except ValueError:
+        raise HTTPException(400, "Контур не разобран")
+    if not isinstance(points, list) or len(points) < 3:
+        raise HTTPException(400, "В контуре нужно хотя бы три точки")
+    if db.one("SELECT 1 FROM apartments WHERE floor_id=? AND number=?",
+              (floor["id"], flat)):
+        raise HTTPException(400, f"Номер {flat} на этом этаже уже есть")
+    _apply_one(proj, floor, d,
+               {"action": "add", "target": "", "number": flat,
+                "polygon": json.dumps(points)}, user, flat)
+    return RedirectResponse(f"/projects/{project_id}?floor={number}", status_code=303)
+
+
+@app.post("/projects/{project_id}/floors/{number}/edits/rename")
+def edit_rename(project_id: int, number: int, request: Request,
+                target: str = Form(...), flat: str = Form(...),
+                user=Depends(require_user)):
+    proj, floor, d = _floor_for_edit(project_id, number, user)
+    flat = flat.strip()
+    if not flat:
+        raise HTTPException(400, "Укажите номер")
+    if flat != target and db.one("SELECT 1 FROM apartments WHERE floor_id=? AND number=?",
+                                 (floor["id"], flat)):
+        raise HTTPException(400, f"Номер {flat} на этом этаже уже есть")
+    _apply_one(proj, floor, d,
+               {"action": "rename", "target": target, "number": flat, "polygon": ""},
+               user, f"{target} -> {flat}")
+    return RedirectResponse(f"/projects/{project_id}?floor={number}", status_code=303)
+
+
+@app.post("/projects/{project_id}/floors/{number}/edits/delete")
+def edit_delete(project_id: int, number: int, request: Request,
+                target: str = Form(...), user=Depends(require_user)):
+    proj, floor, d = _floor_for_edit(project_id, number, user)
+    _apply_one(proj, floor, d,
+               {"action": "delete", "target": target, "number": "", "polygon": ""},
+               user, target)
+    return RedirectResponse(f"/projects/{project_id}?floor={number}", status_code=303)
+
+
+@app.post("/projects/{project_id}/floors/{number}/edits/reset")
+def edit_reset(project_id: int, number: int, request: Request,
+               user=Depends(require_user)):
+    """Сбрасывает ручные правки и пересчитывает этаж заново."""
+    proj, floor, _d = _floor_for_edit(project_id, number, user)
+    db.execute("DELETE FROM floor_edits WHERE floor_id=?", (floor["id"],))
+    jobs.enqueue(floor["id"])
+    db.log_action(user, "floor.edit.reset", f"{proj['name']} эт.{number}")
     return RedirectResponse(f"/projects/{project_id}?floor={number}", status_code=303)
 
 

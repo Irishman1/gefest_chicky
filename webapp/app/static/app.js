@@ -103,7 +103,7 @@
 
   if (plan) {
     plan.addEventListener("mousemove", function (e) {
-      if (!hitData) return;
+      if (editing || !hitData) return;
       var r = plan.getBoundingClientRect();
       var x = (e.clientX - r.left) * hit.width / r.width;
       var y = (e.clientY - r.top) * hit.height / r.height;
@@ -119,9 +119,13 @@
       }
     });
 
-    plan.addEventListener("mouseleave", function () { highlight(0); });
+    plan.addEventListener("mouseleave", function () {
+      if (editing) return;
+      highlight(0);
+    });
 
     plan.addEventListener("click", function () {
+      if (editing) return;
       var flat = flats[active];
       if (!flat) return;
       window.location = "/files/floors/" + floorId + "/apartments/" +
@@ -152,10 +156,157 @@
         encodeURIComponent(a.filename) + "?download=1";
       link.textContent = "Скачать";
 
-      el.append(name, gap, link);
+      el.append(name, gap, link, renameBtn(a), deleteBtn(a));
       el.addEventListener("mouseenter", function () { highlight(a.idx); });
       el.addEventListener("mouseleave", function () { highlight(0); });
       box.appendChild(el);
+    });
+  }
+
+  // ---------------------------------------------------------------- правка
+  var projectId = root.dataset.project;
+  var floorNo = root.dataset.floorNumber;
+  var editing = false, points = [];
+
+  function editUrl(what) {
+    return "/projects/" + projectId + "/floors/" + floorNo + "/edits/" + what;
+  }
+
+  function post(url, fields) {
+    var f = document.createElement("form");
+    f.method = "post";
+    f.action = url;
+    Object.keys(fields).forEach(function (k) {
+      var i = document.createElement("input");
+      i.type = "hidden"; i.name = k; i.value = fields[k];
+      f.appendChild(i);
+    });
+    document.body.appendChild(f);
+    f.submit();
+  }
+
+  function iconBtn(title, path, cls) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn-sm ghost icon-only " + (cls || "");
+    b.title = title;
+    b.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round">' + path + "</svg>";
+    return b;
+  }
+
+  function renameBtn(a) {
+    var b = iconBtn("Переименовать",
+      '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>');
+    b.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      var v = window.prompt("Новый номер для " + a.label, a.number);
+      if (v === null) return;
+      v = v.trim();
+      if (!v || v === a.number) return;
+      post(editUrl("rename"), { target: a.number, flat: v });
+    });
+    return b;
+  }
+
+  function deleteBtn(a) {
+    var b = iconBtn("Удалить",
+      '<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13h10l1-13"/>',
+      "danger");
+    b.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      if (!window.confirm("Удалить " + a.label + " из нарезки?")) return;
+      post(editUrl("delete"), { target: a.number });
+    });
+    return b;
+  }
+
+  var toggle = document.getElementById("edit-toggle");
+  var editHint = document.getElementById("edit-hint");
+  var addForm = document.getElementById("edit-add");
+  var polyField = document.getElementById("edit-polygon");
+  var cancelBtn = document.getElementById("edit-cancel");
+
+  function drawPoints() {
+    if (!ctx) return;
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    if (!points.length) return;
+    var s = overlay.width;                       // контур храним в долях 0..1
+    ctx.save();
+    ctx.beginPath();
+    points.forEach(function (p, i) {
+      var x = p[0] * overlay.width, y = p[1] * overlay.height;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    if (points.length > 2) ctx.closePath();
+    ctx.fillStyle = "rgba(31,111,235,.18)";
+    ctx.strokeStyle = "rgb(31,111,235)";
+    ctx.lineWidth = Math.max(s / 400, 2);
+    if (points.length > 2) ctx.fill();
+    ctx.stroke();
+    points.forEach(function (p) {
+      ctx.beginPath();
+      ctx.arc(p[0] * overlay.width, p[1] * overlay.height,
+              Math.max(s / 250, 4), 0, Math.PI * 2);
+      ctx.fillStyle = "rgb(31,111,235)";
+      ctx.fill();
+    });
+    ctx.restore();
+  }
+
+  function setEditing(on) {
+    editing = on;
+    points = [];
+    active = 0;
+    if (ctx) ctx.clearRect(0, 0, overlay.width, overlay.height);
+    if (editHint) editHint.hidden = !on;
+    if (addForm) addForm.hidden = true;
+    if (toggle) {
+      toggle.classList.toggle("primary", on);
+      toggle.lastChild.nodeValue = on ? " Готово" : " Править вручную";
+    }
+    if (plan) plan.style.cursor = on ? "copy" : "crosshair";
+    if (hint) hint.style.display = "none";
+  }
+
+
+  if (toggle && plan && overlay) {
+    toggle.addEventListener("click", function () { setEditing(!editing); });
+
+    if (cancelBtn) {
+      cancelBtn.addEventListener("click", function () { setEditing(true); });
+    }
+
+    plan.addEventListener("click", function (e) {
+      if (!editing) return;
+      var r = plan.getBoundingClientRect();
+      points.push([(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]);
+      drawPoints();
+      if (addForm) addForm.hidden = points.length < 3;
+      if (polyField) polyField.value = JSON.stringify(points);
+    });
+
+    plan.addEventListener("dblclick", function (e) {
+      if (!editing || points.length < 3) return;
+      e.preventDefault();
+      if (addForm) {
+        addForm.hidden = false;
+        var f = document.getElementById("edit-flat");
+        if (f) f.focus();
+      }
+    });
+
+    document.addEventListener("keydown", function (e) {
+      if (!editing) return;
+      if (e.key === "Escape") setEditing(true);
+      if (e.key === "Backspace" && points.length) {
+        e.preventDefault();
+        points.pop();
+        drawPoints();
+        if (addForm) addForm.hidden = points.length < 3;
+        if (polyField) polyField.value = JSON.stringify(points);
+      }
     });
   }
 

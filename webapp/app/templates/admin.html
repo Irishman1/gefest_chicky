@@ -24,7 +24,7 @@
   {% if invites %}
     <div class="card table-card" style="margin-top:10px">
       <table>
-        <thead><tr><th>Код</th><th>Ссылка для регистрации</th><th class="shrink">Использован</th></tr></thead>
+        <thead><tr><th>Код</th><th>Ссылка для регистрации</th><th class="shrink">Для кого</th><th class="shrink">Использован</th></tr></thead>
         <tbody>
           {% for i in invites %}
             <tr>
@@ -34,6 +34,13 @@
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
                   <span class="mono">/register?code={{ i["code"] }}</span>
                 </button>
+              </td>
+              <td class="shrink">
+                {% if i["username"] %}
+                  <span class="mono">{{ i["username"] }}</span>
+                {% else %}
+                  <span class="muted">любой логин</span>
+                {% endif %}
               </td>
               <td class="shrink">
                 {% if i["used_by"] %}
