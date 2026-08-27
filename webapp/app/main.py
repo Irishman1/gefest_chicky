@@ -39,6 +39,15 @@ def _fmt_time(ts):
 
 
 templates.env.filters["datetime"] = _fmt_time
+
+# Версия статики: StaticFiles не отдаёт Cache-Control, и браузер держит старый
+# CSS после деплоя. Метка времени в ссылке заставляет его забрать новый файл.
+try:
+    STATIC_V = str(int(max(f.stat().st_mtime for f in (BASE / "static").iterdir() if f.is_file())))
+except ValueError:                                       # пустая папка static
+    STATIC_V = "0"
+templates.env.globals["static_v"] = STATIC_V
+
 app = FastAPI(title="Нарезка планировок")
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 
