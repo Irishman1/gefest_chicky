@@ -636,6 +636,35 @@ def colored_fill_mask(rgb: np.ndarray, sat_thr: float, dark_thr: float):
     return colored & ~dark
 
 
+def _bodies_footprint(bodies, margin_frac=0.04):
+    """Габарит підписаних квартир - грубий контур будівлі на аркуші."""
+    y0 = x0 = None
+    y1 = x1 = 0
+    for a in bodies:
+        ys, xs = np.nonzero(a.mask)
+        if not xs.size:
+            continue
+        y0 = ys.min() if y0 is None else min(y0, ys.min())
+        x0 = xs.min() if x0 is None else min(x0, xs.min())
+        y1 = max(y1, ys.max())
+        x1 = max(x1, xs.max())
+    if y0 is None:
+        return None
+    my = (y1 - y0) * margin_frac
+    mx = (x1 - x0) * margin_frac
+    return (y0 - my, x0 - mx, y1 + my, x1 + mx)
+
+
+def _inside_building(rooms, members, footprint):
+    if footprint is None:
+        return True
+    ys, xs = np.nonzero(np.isin(rooms, members))
+    if not xs.size:
+        return False
+    y0, x0, y1, x1 = footprint
+    return y0 <= ys.mean() <= y1 and x0 <= xs.mean() <= x1
+
+
 def seed_component(lab_img: np.ndarray, seed, radius: int):
     """Компонент, у якому стоїть підпис: беремо не один піксель, а віконце навколо."""
     y, x = int(round(seed.point[1])), int(round(seed.point[0]))
@@ -733,20 +762,37 @@ def raster_apartments(rgb: np.ndarray, labels: list, args, px_per_pt: float, nam
         return [], [a.label for a in labels], 0, coverage
     sizes = np.bincount(rooms.ravel(), minlength=n + 1)
 
-    # підпис намальований поверх заливки, тож сам піксель підпису «не залитий»
+    # Підпис намальований поверх заливки, тож сам піксель підпису "не залитий" -
+    # переносимо точку на найближчий залитий піксель. Але тільки якщо заливка
+    # поруч: плани часто дублюють номери у зведеній таблиці збоку, і такий
+    # підпис-двійник інакше "притягнувся" б до випадкової заливки (легенди,
+    # схеми секцій, логотипа) і породив би сміттєвий файл.
     h, w = fill.shape
-    _, (iy, ix) = ndi.distance_transform_edt(~fill, return_indices=True)
-    seed_of_room, seeds = {}, []
+    dist, (iy, ix) = ndi.distance_transform_edt(~fill, return_indices=True)
+    snap_limit = 25 * px_per_pt
+
+    ranked = []
     for a in labels:
         x, y = int(round(a.point[0])), int(round(a.point[1]))
         if not (0 <= x < w and 0 <= y < h):
             continue
-        if not fill[y, x]:
+        ranked.append((float(dist[y, x]), a, x, y))
+    ranked.sort(key=lambda t: t[0])           # найбільш "всередині плану" - перші
+
+    seed_of_room, seeds, taken_numbers = {}, [], set()
+    for d, a, x, y in ranked:
+        if d > snap_limit:
+            continue
+        key = (a.floor, a.number)
+        if key in taken_numbers:              # двійник із таблиці - пропускаємо
+            continue
+        if d > 0:
             x, y = int(ix[y, x]), int(iy[y, x])
             a.point = (x, y)
         r = seed_component(rooms, a, int(round(4 * px_per_pt)))
         if not r or r in seed_of_room:
             continue
+        taken_numbers.add(key)
         seed_of_room[r] = a
         seeds.append(a)
 
@@ -795,13 +841,17 @@ def raster_apartments(rgb: np.ndarray, labels: list, args, px_per_pt: float, nam
     groups.update(clusters)
 
     med = float(np.median([a.mask.sum() for a in bodies]))
+    # Контур будівлі - габарит усіх підписаних квартир. Безіменні кольорові
+    # плями поза ним не є приміщеннями: це схема секцій, логотип забудовника,
+    # плашки легенди на полях аркуша.
+    footprint = _bodies_footprint(bodies)
     extra, orphans = 0, 0
     leftovers = []
     for root, members in groups.items():
         if seed.get(root) is not None:
             continue
         area = int(sum(sizes[m] for m in members))
-        if area >= 0.2 * med:                 # квартира, підпис якої не прочитався
+        if 0.2 * med <= area <= 2.5 * med and _inside_building(rooms, members, footprint):
             piece = np.isin(rooms, members)
             extra += 1
             label, floor, num = None, bodies[0].floor, str(900 + extra)
@@ -1093,17 +1143,33 @@ def cut_page(page, img_getter, args, tess, page_no=1, name_floor=None, log=print
     info = {"mode": None, "missing": [], "orphans": 0, "labels": 0,
             "floor": None, "mask_dpi": None, "error": None}
 
-    if page is not None and args.mode in ("auto", "vector"):
+    if page is not None:
+        # Текстові підписи надійніші за OCR, тож читаємо їх завжди - навіть
+        # у растровому режимі, де OCR лишається запасним варіантом.
         labels = find_text_labels(page, prefix)
         source = "текст PDF"
 
     apts, missing, orphans, mode_used = [], [], 0, None
     if labels and args.mode in ("auto", "vector"):
-        apts, missing, orphans, nfills = vector_apartments(page, labels, args)
-        if apts:
-            mode_used = "vector"
-            log(f"    режим vector: підписів {len(labels)} ({source}), "
-                f"заливок {nfills}, квартир {len(apts)}")
+        # Скільки заливок припадає на один підпис? Якщо квартира намальована
+        # однією заливкою (1-3 на підпис) - векторний розбір точний. Якщо ж
+        # кімнату складено з десятків смужок, "заливка під підписом" вихоплює
+        # випадковий фрагмент, і чесніше піти растровим шляхом, де стіни самі
+        # окреслюють приміщення.
+        unique = len({(a.floor, a.number) for a in labels}) or 1
+        fill_count = sum(1 for p in page_drawings(page)
+                         if is_apartment_fill(p, args.min_area))
+        striped = args.mode == "auto" and fill_count / unique > 4
+
+        if not striped:
+            apts, missing, orphans, nfills = vector_apartments(page, labels, args)
+            if apts:
+                mode_used = "vector"
+                log(f"    режим vector: підписів {len(labels)} ({source}), "
+                    f"заливок {nfills}, квартир {len(apts)}")
+        else:
+            log(f"    креслення зі складеними заливками "
+                f"({fill_count} заливок на {unique} підписів) - беру растровий розбір")
 
     if mode_used is None and args.mode != "vector":
         work_dpi = args.work_dpi
