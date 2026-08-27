@@ -48,6 +48,9 @@ LABEL_RE = re.compile(r"^\s*([^\s\-\u2013]{0,3})[\-\u2013\u2014](\d{1,3})[.,](\d
 # shape as an area figure ("39.72"). We tell a bare label apart by font size:
 # it is always noticeably larger than the area numbers printed under it.
 BARE_LABEL_RE = re.compile(r"^\s*(\d{1,3})[.,](\d{1,3})\s*$")
+# Office/commercial plans number rooms as "No 7" in a margin box, joined to
+# the room by a leader line - see _labels_from_leaders.
+NUMBER_LABEL_RE = re.compile("^\\s*№\\s*(\\d{1,3})\\s*$")
 FLOOR_IN_NAME_RE = re.compile(r"(\d{1,3})\s*(?:-?[а-яїієґ]{0,3})?\s*(?:поверх|этаж|floor)", re.I)
 
 
@@ -155,6 +158,43 @@ def paths_to_mask(page_rect, paths, dpi, clip=None):
     return arr < 128
 
 
+def page_drawings(page):
+    """
+    Vector paths in the same coordinate space the page is rendered in.
+
+    PyMuPDF reports drawings and text in the page's unrotated space, but
+    renders (and therefore our masks and crops) in the rotated space. On a
+    rotated page those two disagree, so everything downstream would be cut
+    from the wrong place. Map the geometry through the rotation matrix once,
+    here, and the rest of the pipeline can stay rotation-agnostic.
+    """
+    drawings = page.get_drawings()
+    if not page.rotation:
+        return drawings
+
+    rm = page.rotation_matrix
+    out = []
+    for dr in drawings:
+        items = []
+        for it in dr["items"]:
+            op = it[0]
+            if op == "l":
+                items.append(("l", it[1] * rm, it[2] * rm))
+            elif op == "c":
+                items.append(("c", it[1] * rm, it[2] * rm, it[3] * rm, it[4] * rm))
+            elif op == "re":
+                items.append(("re", it[1] * rm))
+            elif op == "qu":
+                items.append(("qu", it[1] * rm))
+            else:
+                items.append(it)
+        rotated = dict(dr)
+        rotated["items"] = items
+        rotated["rect"] = dr["rect"] * rm
+        out.append(rotated)
+    return out
+
+
 def _cluster_topleft(items, max_dx=8.0, max_dy=20.0):
     """
     items: list of (floor, num, bbox, size).
@@ -208,6 +248,56 @@ def _cluster_topleft(items, max_dx=8.0, max_dy=20.0):
     return out
 
 
+def _labels_from_leaders(page, numbered, prefix, reach=260.0, max_marker=6.0):
+    """
+    Office-style plans: the number sits OUTSIDE the room, in a little box in
+    the margin, joined to the room by a leader line that ends in a small
+    circle drawn inside the room. The number's own position is therefore
+    useless for finding the room - what matters is where its leader ends.
+
+    Find, for each number, the nearest small circle within a corridor
+    extending from the label towards the plan, and use that circle's centre
+    as the label point.
+    """
+    markers = []
+    for dr in page_drawings(page):
+        r = dr["rect"]
+        if dr["type"] != "s" or r.width > max_marker or r.height > max_marker:
+            continue
+        if not any(it[0] == "c" for it in dr["items"]):
+            continue
+        markers.append(fitz.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2))
+    if not markers:
+        return []
+
+    out = []
+    used = set()
+    for num, bbox in numbered:
+        cx = (bbox.x0 + bbox.x1) / 2
+        cy = (bbox.y0 + bbox.y1) / 2
+        best, best_d = None, None
+        for i, m in enumerate(markers):
+            if i in used:
+                continue
+            # leader lines run straight out of the label box, so stay in a
+            # narrow column (or row) aligned with the label
+            if abs(m.x - cx) > bbox.width * 1.5 + 6:
+                continue
+            dist = abs(m.y - cy)
+            if dist > reach:
+                continue
+            if best_d is None or dist < best_d:
+                best, best_d, best_i = m, dist, i
+        if best is None:
+            continue
+        used.add(best_i)
+        # The marker sits on the room's wall, not inside it - step further
+        # along the leader so the point lands in the room's own fill.
+        step = 12.0 if best.y >= cy else -12.0
+        out.append(Apartment(f"{prefix}-{num}", "", num, (best.x, best.y + step)))
+    return out
+
+
 def find_text_labels(page, prefix):
     """
     Apartment labels from the PDF text layer.
@@ -221,22 +311,33 @@ def find_text_labels(page, prefix):
     into apartment info-boxes (label plus its one or two area lines), and
     only the label - the top-left item of each group - is kept.
     """
-    trusted, bare = [], []
+    rm = page.rotation_matrix if page.rotation else None
+    trusted, bare, numbered = [], [], []
     for block in page.get_text("dict")["blocks"]:
         for line in block.get("lines", []):
             for span in line["spans"]:
                 text = span["text"]
+                bbox = fitz.Rect(span["bbox"])
+                if rm is not None:
+                    bbox = bbox * rm
                 parsed = parse_label(text, prefix)
                 if parsed:
                     label, floor, num = parsed
-                    x0, y0, x1, y1 = span["bbox"]
                     trusted.append(Apartment(label, floor, num,
-                                             ((x0 + x1) / 2, (y0 + y1) / 2)))
+                                             ((bbox.x0 + bbox.x1) / 2,
+                                              (bbox.y0 + bbox.y1) / 2)))
+                    continue
+                nm = NUMBER_LABEL_RE.match(text)
+                if nm:
+                    numbered.append((nm.group(1), bbox))
                     continue
                 bm = BARE_LABEL_RE.match(text)
                 if bm:
-                    bare.append((bm.group(1), bm.group(2), span["bbox"],
+                    bare.append((bm.group(1), bm.group(2), tuple(bbox),
                                 round(span["size"], 1)))
+
+    if numbered:
+        trusted.extend(_labels_from_leaders(page, numbered, prefix))
 
     if not bare:
         return trusted
@@ -256,25 +357,37 @@ def find_text_labels(page, prefix):
 
 def vector_apartments(page, labels, args):
     """Збирає квартири з векторних заливок. Повертає (квартири, без_заливки, сироти)."""
-    fills = [p for p in page.get_drawings() if is_apartment_fill(p, args.min_area)]
+    fills = [p for p in page_drawings(page) if is_apartment_fill(p, args.min_area)]
     if not fills:
         return [], [a.label for a in labels], 0, 0
 
-    unassigned = []
-    for path in fills:                       # тіло = заливка, в якій стоїть підпис
+    # Тіло квартири - заливка, в якій стоїть підпис. Підпис часто стоїть
+    # одразу на кількох вкладених заливках (меблі, обладнання, сама кімната);
+    # беремо найбільшу з них, інакше "тілом" стане намальований стіл, а
+    # справжня кімната лишиться неприв'язаною.
+    covers = {}
+    for idx, path in enumerate(fills):
         r = path["rect"]
-        inside = [a for a in labels
-                  if not a.paths and r.contains(fitz.Point(*a.point))]
-        owner = None
-        if inside:
-            m = paths_to_mask(page.rect, [path], 72)
-            h, w = m.shape
-            for a in inside:
-                x, y = int(a.point[0]), int(a.point[1])
-                if 0 <= x < w and 0 <= y < h and m[y, x]:
-                    owner = a
-                    break
-        (owner.paths if owner else unassigned).append(path)
+        inside = [a for a in labels if r.contains(fitz.Point(*a.point))]
+        if not inside:
+            continue
+        m = paths_to_mask(page.rect, [path], 72)
+        h, w = m.shape
+        for a in inside:
+            x, y = int(a.point[0]), int(a.point[1])
+            if 0 <= x < w and 0 <= y < h and m[y, x]:
+                covers.setdefault(id(a), []).append(idx)
+
+    taken = set()
+    for a in labels:
+        options = [i for i in covers.get(id(a), []) if i not in taken]
+        if not options:
+            continue
+        best = max(options, key=lambda i: fills[i]["rect"].get_area())
+        taken.add(best)
+        a.paths.append(fills[best])
+
+    unassigned = [f for i, f in enumerate(fills) if i not in taken]
 
     # Деякі плани малюють підпис за 1-3pt від межі його заливки, а не строго
     # всередині (частіше трапляється в кутових приміщеннях зі скошеними
