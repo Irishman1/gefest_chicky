@@ -214,6 +214,8 @@
   var projectId = root.dataset.project;
   var floorNo = root.dataset.floorNumber;
   var editing = false, points = [];
+  var shapeMode = false;          // правим готовый контур, а не рисуем новый
+  var dragIdx = -1, hoverIdx = -1;
 
   function editUrl(what) {
     return "/projects/" + projectId + "/floors/" + floorNo + "/edits/" + what;
@@ -280,6 +282,74 @@
     return b;
   }
 
+  // ---- контур существующей вырезки: обводим маску, чтобы её можно было
+  //      править за точки, а не рисовать заново
+
+  function traceContour(id) {
+    if (!hitData || !hit) return null;
+    var W = hit.width, H = hit.height;
+    function on(x, y) {
+      return x >= 0 && y >= 0 && x < W && y < H && hitData[(y * W + x) * 4] === id;
+    }
+    var sx = -1, sy = -1;
+    for (var y = 0; y < H && sy < 0; y++) {
+      for (var x = 0; x < W; x++) { if (on(x, y)) { sx = x; sy = y; break; } }
+    }
+    if (sy < 0) return null;
+
+    // марширующие квадраты: идём по границе между закрашенным и пустым
+    var pts = [], cx = sx, cy = sy, dx = 0, dy = 0, steps = 0, limit = 4 * (W + H) * 4;
+    do {
+      var st = (on(cx - 1, cy - 1) ? 1 : 0) | (on(cx, cy - 1) ? 2 : 0)
+             | (on(cx - 1, cy) ? 4 : 0) | (on(cx, cy) ? 8 : 0);
+      var nx = 0, ny = 0;
+      if (st === 1 || st === 5 || st === 13) { ny = -1; }
+      else if (st === 2 || st === 3 || st === 7) { nx = 1; }
+      else if (st === 4 || st === 12 || st === 14) { nx = -1; }
+      else if (st === 8 || st === 10 || st === 11) { ny = 1; }
+      else if (st === 6) { nx = (dy === -1) ? -1 : 1; }
+      else if (st === 9) { ny = (dx === 1) ? -1 : 1; }
+      else break;
+      if (nx !== dx || ny !== dy) pts.push([cx, cy]);     // угол
+      dx = nx; dy = ny; cx += dx; cy += dy;
+      if (++steps > limit) break;
+    } while (!(cx === sx && cy === sy));
+    return pts.length >= 3 ? pts : null;
+  }
+
+  // Рамер—Дуглас—Пойкер: из тысяч ступенек границы делаем десяток вершин,
+  // за которые реально можно ухватиться мышью
+  function simplify(pts, eps) {
+    if (pts.length < 3) return pts;
+    function seg(a, b, p) {
+      var vx = b[0] - a[0], vy = b[1] - a[1];
+      var len = Math.hypot(vx, vy) || 1;
+      return Math.abs((p[0] - a[0]) * vy - (p[1] - a[1]) * vx) / len;
+    }
+    function walk(first, last) {
+      var worst = 0, idx = -1;
+      for (var i = first + 1; i < last; i++) {
+        var d = seg(pts[first], pts[last], pts[i]);
+        if (d > worst) { worst = d; idx = i; }
+      }
+      if (worst <= eps || idx < 0) return [pts[first]];
+      return walk(first, idx).concat(walk(idx, last));
+    }
+    return walk(0, pts.length - 1).concat([pts[pts.length - 1]]);
+  }
+
+  function contourOf(id) {
+    var raw = traceContour(id);
+    if (!raw) return null;
+    var eps = Math.max(hit.width, hit.height) / 260;
+    var out = simplify(raw, eps);
+    for (var i = 0; i < 6 && out.length > 48; i++) {     // не больше полусотни точек
+      eps *= 1.6;
+      out = simplify(raw, eps);
+    }
+    return out.map(function (p) { return [p[0] / hit.width, p[1] / hit.height]; });
+  }
+
   // ---- всплывающий выбор: редактировать или скачать
   var pick = document.getElementById("pick");
   var pickLabel = document.getElementById("pick-label");
@@ -325,6 +395,20 @@
     if (ff) ff.value = flat.number;
     if (addForm) addForm.action = editUrl("replace");
 
+    // Обводим уже вырезанное: тянуть точки быстрее, чем обводить заново.
+    // Если контур снять не удалось — остаётся обычная обводка с нуля.
+    var got = contourOf(flat.idx);
+    if (got && got.length >= 3) {
+      points = got;
+      shapeMode = true;
+      if (polyField) polyField.value = JSON.stringify(points);
+      if (addForm) addForm.hidden = false;
+      if (editHint) {
+        editHint.textContent = "Тяните точки, чтобы поправить контур. " +
+          "Клик по линии добавит точку, Alt+клик по точке уберёт её.";
+      }
+    }
+
     var box = flat.box;
     if (box && overlay.width && fitWidth) {
       // рамка приходит в координатах hit-карты; переводим в доли плана
@@ -366,12 +450,15 @@
     if (points.length > 2) ctx.fill();
     ctx.stroke();
     points.forEach(function (p, i) {
+      var live = (i === dragIdx || i === hoverIdx);
       ctx.beginPath();
-      ctx.arc(p[0] * overlay.width, p[1] * overlay.height, 3 * k, 0, Math.PI * 2);
-      // первая точка заметнее — по ней видно, где замкнётся контур
-      ctx.fillStyle = i === 0 ? "#fff" : "rgb(31,111,235)";
+      ctx.arc(p[0] * overlay.width, p[1] * overlay.height,
+              (live ? 5 : 3) * k, 0, Math.PI * 2);
+      // точка под курсором крупнее — видно, за что берёшься;
+      // первая белая — по ней видно, где замкнётся контур
+      ctx.fillStyle = live ? "#fff" : (i === 0 && !shapeMode ? "#fff" : "rgb(31,111,235)");
       ctx.fill();
-      ctx.lineWidth = 1.5 * k;
+      ctx.lineWidth = (live ? 2 : 1.5) * k;
       ctx.stroke();
     });
     ctx.restore();
@@ -381,6 +468,12 @@
     editing = on;
     points = [];
     active = 0;
+    shapeMode = false;
+    dragIdx = hoverIdx = -1;
+    if (editHint) {
+      editHint.textContent = "Обводите помещение кликами по плану — минимум три "
+        + "точки. Двойной клик замыкает контур.";
+    }
     if (!on) {
       focusId = 0;
       var tf = document.getElementById("edit-target");
@@ -412,12 +505,90 @@
     }
 
     plan.addEventListener("click", function (e) {
-      if (!editing) return;
+      if (!editing || shapeMode) return;      // в правке формы клики обрабатывает drag
       var r = plan.getBoundingClientRect();
       points.push([(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]);
       paint();
       if (addForm) addForm.hidden = points.length < 3;
       if (polyField) polyField.value = JSON.stringify(points);
+    });
+
+    // ---- перетаскивание вершин готового контура
+    function localPt(e) {
+      var r = plan.getBoundingClientRect();
+      return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height, r];
+    }
+
+    // ближайшая вершина в пределах grab экранных пикселей
+    function vertexAt(fx, fy, r, grab) {
+      var best = -1, bestD = grab;
+      points.forEach(function (p, i) {
+        var d = Math.hypot((p[0] - fx) * r.width, (p[1] - fy) * r.height);
+        if (d < bestD) { bestD = d; best = i; }
+      });
+      return best;
+    }
+
+    // ребро, на которое пришёлся клик — туда вставим новую вершину
+    function edgeAt(fx, fy, r, grab) {
+      var best = -1, bestD = grab;
+      for (var i = 0; i < points.length; i++) {
+        var a = points[i], b = points[(i + 1) % points.length];
+        var ax = a[0] * r.width, ay = a[1] * r.height;
+        var bx = b[0] * r.width, by = b[1] * r.height;
+        var px = fx * r.width, py = fy * r.height;
+        var vx = bx - ax, vy = by - ay;
+        var len2 = vx * vx + vy * vy;
+        var t = len2 ? Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / len2)) : 0;
+        var d = Math.hypot(px - (ax + t * vx), py - (ay + t * vy));
+        if (d < bestD) { bestD = d; best = i; }
+      }
+      return best;
+    }
+
+    function syncPoly() {
+      if (polyField) polyField.value = JSON.stringify(points);
+    }
+
+    plan.addEventListener("mousedown", function (e) {
+      if (!editing || !shapeMode || e.button !== 0) return;
+      var lp = localPt(e), fx = lp[0], fy = lp[1], r = lp[2];
+      var v = vertexAt(fx, fy, r, 12);
+      if (v >= 0) {
+        if (e.altKey && points.length > 3) {      // Alt — убрать вершину
+          points.splice(v, 1);
+          syncPoly(); paint();
+          return;
+        }
+        dragIdx = v;
+        e.preventDefault();
+        return;
+      }
+      var edge = edgeAt(fx, fy, r, 10);
+      if (edge >= 0) {                            // клик по линии — новая вершина
+        points.splice(edge + 1, 0, [fx, fy]);
+        dragIdx = edge + 1;
+        syncPoly(); paint();
+        e.preventDefault();
+      }
+    });
+
+    plan.addEventListener("mousemove", function (e) {
+      if (!editing || !shapeMode) return;
+      var lp = localPt(e), fx = lp[0], fy = lp[1], r = lp[2];
+      if (dragIdx >= 0) {
+        points[dragIdx] = [Math.min(Math.max(fx, 0), 1), Math.min(Math.max(fy, 0), 1)];
+        syncPoly(); paint();
+        return;
+      }
+      var v = vertexAt(fx, fy, r, 12);
+      if (v !== hoverIdx) { hoverIdx = v; paint(); }
+      plan.style.cursor = v >= 0 ? "grab"
+        : (edgeAt(fx, fy, r, 10) >= 0 ? "copy" : "default");
+    });
+
+    document.addEventListener("mouseup", function () {
+      if (dragIdx >= 0) { dragIdx = -1; syncPoly(); paint(); }
     });
 
     plan.addEventListener("dblclick", function (e) {
