@@ -6,3 +6,5 @@ webapp/backups/
 *.pdf
 .env
 *.torrent
+результаты/
+результаты_новые/
