@@ -90,6 +90,12 @@
           <img id="plan" src="/files/floors/{{ floor['id'] }}/preview.png" alt="План этажа {{ floor['number'] }}">
           <canvas id="overlay"></canvas>
           <div id="hint" class="hint"></div>
+          <div id="pick" class="pick" hidden>
+            <b id="pick-label"></b>
+            <button type="button" id="pick-edit" class="btn-sm primary">Редактировать</button>
+            <a id="pick-download" class="btn-sm">Скачать</a>
+            <button type="button" id="pick-close" class="btn-sm ghost icon-only" title="Закрыть">×</button>
+          </div>
         </div>
       </div>
       <div class="edit-bar">
@@ -104,6 +110,7 @@
         <form id="edit-add" method="post" hidden
               action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/edits/add">
           <input type="hidden" name="polygon" id="edit-polygon">
+          <input type="hidden" name="target" id="edit-target">
           <input type="text" name="flat" id="edit-flat" required autocomplete="off"
                  placeholder="номер, напр. {{ apartments[0]['number'] if apartments else '1' }}">
           <button class="primary btn-sm" type="submit">Сохранить контур</button>

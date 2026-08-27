@@ -36,7 +36,7 @@
   var hint = document.getElementById("hint");
   var ctx = overlay ? overlay.getContext("2d") : null;
   var hit = null, hitCtx = null, hitData = null;
-  var flats = {}, cache = {}, active = 0;
+  var flats = {}, cache = {}, solidCache = {}, active = 0, focusId = 0;
 
   // цвет подсветки берём из палитры темы, чтобы план и интерфейс совпадали
   function hlColor() {
@@ -82,13 +82,46 @@
     return c;
   }
 
+  // сплошной силуэт — им «прорезаем» затемнение вокруг правимой вырезки
+  function solid(id) {
+    if (solidCache[id]) return solidCache[id];
+    var c = document.createElement("canvas");
+    c.width = hit.width; c.height = hit.height;
+    var cc = c.getContext("2d");
+    var img = cc.createImageData(hit.width, hit.height);
+    var d = img.data;
+    for (var p = 0, q = 0; p < hitData.length; p += 4, q += 4) {
+      if (hitData[p] === id) { d[q + 3] = 255; }
+    }
+    cc.putImageData(img, 0, 0);
+    solidCache[id] = c;
+    return c;
+  }
+
+  function paint() {
+    if (!ctx) return;
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+    // правим конкретную вырезку: всё вокруг притушено, но остаётся видимым
+    if (focusId && hitData) {
+      ctx.save();
+      ctx.fillStyle = "rgba(10,14,20,.5)";
+      ctx.fillRect(0, 0, overlay.width, overlay.height);
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.drawImage(solid(focusId), 0, 0);
+      ctx.restore();
+    }
+
+    if (editing) { drawPoints(); return; }
+    if (active && hitData) ctx.drawImage(silhouette(active), 0, 0);
+  }
+
   function highlight(id) {
     if (id === active) return;
     active = id;
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
     document.querySelectorAll(".flat").forEach(function (el) { el.classList.remove("hl"); });
-    if (!id) { hint.style.display = "none"; return; }
-    ctx.drawImage(silhouette(id), 0, 0);
+    if (!id) { hint.style.display = "none"; paint(); return; }
+    paint();
     var el = document.querySelector('.flat[data-idx="' + id + '"]');
     if (el) el.classList.add("hl");
   }
@@ -96,9 +129,7 @@
   // при смене темы перерисовываем подсветку новым акцентом
   document.addEventListener("themechange", function () {
     cache = {};
-    if (!hitData || !active) return;
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
-    ctx.drawImage(silhouette(active), 0, 0);
+    if (hitData) paint();
   });
 
   if (plan) {
@@ -124,12 +155,12 @@
       highlight(0);
     });
 
-    plan.addEventListener("click", function () {
+    plan.addEventListener("click", function (e) {
       if (editing) return;
       var flat = flats[active];
-      if (!flat) return;
-      window.location = "/files/floors/" + floorId + "/apartments/" +
-        encodeURIComponent(flat.filename) + "?download=1";
+      if (!flat) { closePick(); return; }
+      var r = plan.getBoundingClientRect();
+      showPick(flat, e.clientX - r.left, e.clientY - r.top);
     });
   }
 
@@ -243,13 +274,70 @@
       '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>');
     b.addEventListener("click", function (ev) {
       ev.stopPropagation();
-      if (!window.confirm("Удалить контур " + a.label +
-                          " и обвести заново?")) return;
-      // номер переживает удаление: подставим его в форму после перезагрузки
-      try { sessionStorage.setItem("redraw-" + floorId, a.number); } catch (e) {}
-      post(editUrl("delete"), { target: a.number });
+      focusOn(a);
+      root.scrollIntoView({ block: "center" });
     });
     return b;
+  }
+
+  // ---- всплывающий выбор: редактировать или скачать
+  var pick = document.getElementById("pick");
+  var pickLabel = document.getElementById("pick-label");
+  var pickEdit = document.getElementById("pick-edit");
+  var pickDl = document.getElementById("pick-download");
+  var pickClose = document.getElementById("pick-close");
+  var picked = null;
+
+  function closePick() {
+    picked = null;
+    if (pick) pick.hidden = true;
+  }
+
+  function showPick(flat, x, y) {
+    if (!pick) return;
+    picked = flat;
+    pickLabel.textContent = flat.label;
+    pickDl.href = "/files/floors/" + floorId + "/apartments/" +
+      encodeURIComponent(flat.filename) + "?download=1";
+    pick.style.left = x + "px";
+    pick.style.top = y + "px";
+    pick.hidden = false;
+    hint.style.display = "none";
+  }
+
+  if (pickClose) pickClose.addEventListener("click", closePick);
+  if (pickEdit) {
+    pickEdit.addEventListener("click", function () {
+      if (picked) focusOn(picked);
+    });
+  }
+
+  // Приближаемся к правимой вырезке и притушаем остальное: обводить по
+  // мелкому плану неудобно, а видеть соседей всё равно нужно.
+  function focusOn(flat) {
+    closePick();
+    setEditing(true);
+    focusId = flat.idx;
+
+    var tf = document.getElementById("edit-target");
+    var ff = document.getElementById("edit-flat");
+    if (tf) tf.value = flat.number;
+    if (ff) ff.value = flat.number;
+    if (addForm) addForm.action = editUrl("replace");
+
+    var box = flat.box;
+    if (box && overlay.width && fitWidth) {
+      // рамка приходит в координатах hit-карты; переводим в доли плана
+      var fw = Math.max((box[2] - box[0]) / overlay.width, 0.002);
+      var fh = Math.max((box[3] - box[1]) / overlay.height, 0.002);
+      var planH1 = fitWidth * overlay.height / overlay.width;   // высота при 100%
+      var vw = root.clientWidth, vh = root.clientHeight;
+      // вписываем рамку в окно и оставляем поля, чтобы соседей было видно
+      applyZoom(Math.min(vw / (fw * fitWidth), vh / (fh * planH1)) * 0.75);
+      root.scrollLeft = (box[0] + box[2]) / 2 / overlay.width * plan.clientWidth - vw / 2;
+      root.scrollTop = (box[1] + box[3]) / 2 / overlay.height * plan.clientHeight - vh / 2;
+    }
+    paint();
   }
 
   var toggle = document.getElementById("edit-toggle");
@@ -259,9 +347,7 @@
   var cancelBtn = document.getElementById("edit-cancel");
 
   function drawPoints() {
-    if (!ctx) return;
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
-    if (!points.length) return;
+    if (!ctx || !points.length) return;
     var s = overlay.width;                       // контур храним в долях 0..1
     ctx.save();
     ctx.beginPath();
@@ -289,7 +375,13 @@
     editing = on;
     points = [];
     active = 0;
-    if (ctx) ctx.clearRect(0, 0, overlay.width, overlay.height);
+    if (!on) {
+      focusId = 0;
+      var tf = document.getElementById("edit-target");
+      if (tf) tf.value = "";
+      if (addForm) addForm.action = editUrl("add");
+    }
+    closePick();
     if (editHint) editHint.hidden = !on;
     if (addForm) addForm.hidden = true;
     if (toggle) {
@@ -298,6 +390,7 @@
     }
     if (plan) plan.style.cursor = on ? "copy" : "crosshair";
     if (hint) hint.style.display = "none";
+    paint();
   }
 
 
@@ -312,7 +405,7 @@
       if (!editing) return;
       var r = plan.getBoundingClientRect();
       points.push([(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]);
-      drawPoints();
+      paint();
       if (addForm) addForm.hidden = points.length < 3;
       if (polyField) polyField.value = JSON.stringify(points);
     });
@@ -333,7 +426,7 @@
       if (e.key === "Backspace" && points.length) {
         e.preventDefault();
         points.pop();
-        drawPoints();
+        paint();
         if (addForm) addForm.hidden = points.length < 3;
         if (polyField) polyField.value = JSON.stringify(points);
       }
@@ -373,17 +466,6 @@
     fitWidth = plan.clientWidth;
     if (levelEl) levelEl.textContent = "100%";
   }
-
-  // возвращаемся после «перерисовать»: сразу режим обводки с тем же номером
-  try {
-    var pending = sessionStorage.getItem("redraw-" + floorId);
-    if (pending) {
-      sessionStorage.removeItem("redraw-" + floorId);
-      setEditing(true);
-      var pf = document.getElementById("edit-flat");
-      if (pf) pf.value = pending;
-    }
-  } catch (e) {}
 
   if (plan) {
     if (plan.complete) initZoom();

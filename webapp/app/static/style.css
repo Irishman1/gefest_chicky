@@ -497,6 +497,18 @@ h1 .kind { margin-left: 8px; }
 .viewer.panning { cursor: grabbing; }
 #plan { transform-origin: 0 0; }
 
+/* всплывающий выбор действия над вырезкой на плане */
+.pick {
+  position: absolute; z-index: 6; display: flex; align-items: center; gap: 6px;
+  padding: 6px; border-radius: var(--r-sm); white-space: nowrap;
+  background: var(--surface); border: 1px solid var(--line-2);
+  box-shadow: var(--sh-3);
+  transform: translate(-50%, calc(-100% - 12px));
+}
+.pick[hidden] { display: none; }
+.pick b { font: 600 12.5px var(--font); padding: 0 4px; color: var(--text); }
+.pick .btn-sm { height: 26px; }
+
 /* ---- ручная правка нарезки ---- */
 .edit-bar {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;

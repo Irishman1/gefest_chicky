@@ -283,8 +283,10 @@ def project_page(project_id: int, request: Request, floor: int = 0,
     current = next((f for f in floors if f["number"] == floor), floors[0])
     apts = db.query("SELECT * FROM apartments WHERE floor_id = ? ORDER BY idx",
                     (current["id"],))
+    # рамка нужна на клиенте, чтобы приблизиться к вырезке при правке
     flats = [{"idx": a["idx"], "label": a["label"], "number": a["number"],
-              "filename": a["filename"]} for a in apts]
+              "filename": a["filename"],
+              "box": [a["x0"], a["y0"], a["x1"], a["y1"]]} for a in apts]
     return page(request, "project.html", project=proj, floors=floors,
                 floor=current, apartments=apts, flats_json=flats)
 
@@ -392,6 +394,33 @@ def edit_add(project_id: int, number: int, request: Request,
     if db.one("SELECT 1 FROM apartments WHERE floor_id=? AND number=?",
               (floor["id"], flat)):
         raise HTTPException(400, f"Номер {flat} на этом этаже уже есть")
+    _apply_one(proj, floor, d,
+               {"action": "add", "target": "", "number": flat,
+                "polygon": json.dumps(points)}, user, flat)
+    return RedirectResponse(f"/projects/{project_id}?floor={number}", status_code=303)
+
+
+@app.post("/projects/{project_id}/floors/{number}/edits/replace")
+def edit_replace(project_id: int, number: int, request: Request,
+                 target: str = Form(...), flat: str = Form(...),
+                 polygon: str = Form(...), user=Depends(require_user)):
+    """Перерисовать контур: старый убираем и тут же кладём новый."""
+    proj, floor, d = _floor_for_edit(project_id, number, user)
+    flat = flat.strip()
+    if not flat:
+        raise HTTPException(400, "Укажите номер")
+    try:
+        points = json.loads(polygon)
+    except ValueError:
+        raise HTTPException(400, "Контур не разобран")
+    if not isinstance(points, list) or len(points) < 3:
+        raise HTTPException(400, "В контуре нужно хотя бы три точки")
+    if flat != target and db.one("SELECT 1 FROM apartments WHERE floor_id=? AND number=?",
+                                 (floor["id"], flat)):
+        raise HTTPException(400, f"Номер {flat} на этом этаже уже есть")
+    _apply_one(proj, floor, d,
+               {"action": "delete", "target": target, "number": "", "polygon": ""},
+               user, target)
     _apply_one(proj, floor, d,
                {"action": "add", "target": "", "number": flat,
                 "polygon": json.dumps(points)}, user, flat)
