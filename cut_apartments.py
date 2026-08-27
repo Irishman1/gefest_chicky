@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,6 +59,14 @@ BARE_LABEL_RE = re.compile(r"^\s*(\d{1,3})[.,](\d{1,3})\s*$")
 # the room by a leader line - see _labels_from_leaders.
 NUMBER_LABEL_RE = re.compile("^\\s*№\\s*(\\d{1,3})\\s*$")
 FLOOR_IN_NAME_RE = re.compile(r"(\d{1,3})\s*(?:-?[а-яїієґ]{0,3})?\s*(?:поверх|этаж|floor)", re.I)
+
+# Навмисно широкий шаблон для запасного розбору (див. choose_label_family):
+# ловить усе, що взагалі схоже на "літера + поверх + номер", разом із площами
+# та розмірними виносками. Відсіює їх не шаблон, а статистика.
+LOOSE_LABEL_RE = re.compile(
+    r"(?<![\d,.])([A-ZА-ЯЇІЄҐ]{0,2})\s*[-–—]?\s*"
+    r"(\d{1,3})\s*[.,]\s*(\d{1,3})"
+    r"(?![\d,.])(?!\s*[мmМM]\s*[²2])")
 
 
 @dataclass
@@ -117,6 +126,128 @@ def parse_label(text, prefix):
     if not letter or letter.isdigit():
         letter = prefix
     return f"{letter}-{floor}.{num}", floor, num
+
+
+# ======================================================= виведення схеми підпису
+#
+# Жорсткі шаблони вище знають рівно ті формати, які вже траплялись. Коли
+# проєктувальник нумерує квартири інакше, вони мовчки дають нуль підписів.
+# Запасний розбір не питає "чи підходить під формат", а збирає всіх кандидатів
+# широким шаблоном і шукає серед них родину, яка *поводиться* як нумерація
+# квартир. Ознаки, за якими вона впізнається, беруться з самого креслення.
+
+
+@dataclass
+class LabelCandidate:
+    letter: str
+    floor: str
+    number: str
+    point: tuple
+    size: float                    # кегль (текст) або висота рядка (OCR)
+
+
+def _family_score(letter, items, noise_size, n_fills):
+    """Наскільки група схожа на нумерацію квартир. Більше — краще, 0 — не схожа."""
+    nums = sorted({int(c.number) for c in items})
+    if len(nums) < 2:
+        return 0.0, {}
+
+    span = nums[-1] - nums[0] + 1
+    contiguity = len(nums) / span                  # 1.0 — суцільний ряд без дірок
+    from_one = 1.0 if nums[0] <= 2 else 0.65       # квартири нумерують з 1
+    letter_bonus = 1.0 if letter else 0.75         # літера — сильніший сигнал
+    median = sorted(c.size for c in items)[len(items) // 2]
+    bigger_than_noise = 1.0 if median > noise_size + 0.3 else 0.5
+
+    fits_fills = 1.0
+    if n_fills:                                    # заливки — це «правильна відповідь»
+        fits_fills = 1.0 - min(abs(len(nums) - n_fills) / max(n_fills, 1), 1.0)
+
+    score = (len(nums) * contiguity * from_one * letter_bonus
+             * bigger_than_noise * (0.35 + 0.65 * fits_fills))
+    why = {"кандидатів": len(nums), "суцільність": round(contiguity, 2),
+           "кегль": round(median, 1), "збіг із заливками": round(fits_fills, 2)}
+    return score, why
+
+
+def choose_label_family(cands, n_fills=None, log=print):
+    """
+    Вибирає з кандидатів найімовірнішу родину підписів квартир.
+
+    Ознаки, всі — з креслення, жодної зашитої константи:
+      * кегль        — найчастіший розмір це розмірні виноски, тобто шум;
+                       підпис завжди помітно більший;
+      * спільні літера й поверх — у справжньої родини вони одні на всіх;
+      * суцільний ряд — номери йдуть 1..N майже без дірок;
+      * кількість заливок — квартир рівно стільки, скільки зафарбованих областей.
+
+    Повертає список LabelCandidate обраної родини (можливо порожній).
+    """
+    if not cands:
+        return []
+
+    sizes = Counter(round(c.size, 1) for c in cands)
+    noise_size = max(sizes, key=lambda s: (sizes[s], -s))
+
+    fams = defaultdict(list)
+    for c in cands:
+        fams[(c.letter, c.floor)].append(c)
+
+    ranked = []
+    for (letter, floor), items in fams.items():
+        score, why = _family_score(letter, items, noise_size, n_fills)
+        if score > 0:
+            ranked.append((score, letter, floor, items, why))
+    if not ranked:
+        return []
+
+    ranked.sort(key=lambda r: -r[0])
+    score, letter, floor, items, why = ranked[0]
+
+    # Родина має вигравати впевнено: коли другий претендент майже рівний,
+    # вибір випадковий, і краще чесно нічого не повернути.
+    if len(ranked) > 1 and ranked[1][0] > score * 0.8:
+        log(f"    !! схему підпису визначити не вдалось: "
+            f"'{letter or '—'}-{floor}' і '{ranked[1][1] or '—'}-{ranked[1][2]}' рівноцінні")
+        return []
+
+    log(f"    схема підпису виведена з креслення: літера '{letter or '—'}', "
+        f"поверх {floor} ({', '.join(f'{k} {v}' for k, v in why.items())})")
+    if n_fills and len({int(c.number) for c in items}) < n_fills:
+        log(f"    i  заливок {n_fills}, підписів {len({int(c.number) for c in items})} — "
+            f"частину підписів прочитати не вдалось")
+    return items
+
+
+def text_label_candidates(page):
+    """Усі кандидати в підпис із текстового шару, разом із кеглем."""
+    rm = page.rotation_matrix if page.rotation else None
+    out = []
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            for span in line["spans"]:
+                bbox = fitz.Rect(span["bbox"])
+                if rm is not None:
+                    bbox = bbox * rm
+                for m in LOOSE_LABEL_RE.finditer(span["text"]):
+                    letter, floor, num = m.groups()
+                    out.append(LabelCandidate(
+                        letter or "", floor, num,
+                        ((bbox.x0 + bbox.x1) / 2, (bbox.y0 + bbox.y1) / 2),
+                        round(span["size"], 1)))
+    return out
+
+
+def candidates_to_apartments(cands, prefix):
+    seen, out = set(), []
+    for c in cands:
+        key = (c.floor, c.number)
+        if key in seen:
+            continue
+        seen.add(key)
+        letter = fix_letter(c.letter, prefix)
+        out.append(Apartment(f"{letter}-{c.floor}.{c.number}", c.floor, c.number, c.point))
+    return out
 
 
 # ================================================================ векторний режим
@@ -518,7 +649,8 @@ def clean_for_ocr(img: Image.Image, px_per_pt: float) -> Image.Image:
     return Image.fromarray(np.where(keep[lab], 0, 255).astype(np.uint8))
 
 
-def run_tesseract(img: Image.Image, tess: str, psm: str, upscale: float):
+def run_tesseract(img: Image.Image, tess: str, psm: str, upscale: float,
+                  pattern=None, with_size=False):
     if upscale != 1.0:
         img = img.resize((int(img.width * upscale), int(img.height * upscale)),
                          Image.LANCZOS)
@@ -558,14 +690,29 @@ def run_tesseract(img: Image.Image, tess: str, psm: str, upscale: float):
                 text += " "
             spans.append((len(text), len(text) + len(w), box))
             text += w
-        for m in OCR_LABEL_RE.finditer(text):
+        for m in (pattern or OCR_LABEL_RE).finditer(text):
             hit = [b for s0, s1, b in spans if s0 < m.end() and s1 > m.start()]
             if not hit:
                 continue
             x = (min(b[0] for b in hit) + max(b[0] + b[2] for b in hit)) / 2 / upscale
             y = (min(b[1] for b in hit) + max(b[1] + b[3] for b in hit)) / 2 / upscale
-            found.append((m.groups(), (x, y)))
+            if with_size:                       # висота рядка заміняє кегль
+                found.append((m.groups(), (x, y), max(b[3] for b in hit) / upscale))
+            else:
+                found.append((m.groups(), (x, y)))
     return found
+
+
+def ocr_label_candidates(img: Image.Image, tess: str, px_per_pt: float):
+    """Кандидати в підпис із OCR — широким шаблоном, разом із висотою рядка."""
+    cleaned = clean_for_ocr(img, px_per_pt)
+    out = []
+    for up, psm in ((1.5, "11"), (2.0, "11"), (1.0, "3")):
+        for groups, point, size in run_tesseract(cleaned, tess, psm, up,
+                                                 LOOSE_LABEL_RE, with_size=True):
+            letter, floor, num = groups
+            out.append(LabelCandidate(letter or "", floor, num, point, size))
+    return out
 
 
 LATIN2CYR = {"A": "А", "B": "В", "C": "С", "E": "Е", "H": "Н", "I": "І", "K": "К",
@@ -1161,6 +1308,15 @@ def cut_page(page, img_getter, args, tess, page_no=1, name_floor=None, log=print
         # у растровому режимі, де OCR лишається запасним варіантом.
         labels = find_text_labels(page, prefix)
         source = "текст PDF"
+        if not labels:
+            # Жоден відомий формат не підійшов — пробуємо вивести схему
+            # нумерації з самого креслення.
+            n_fills = sum(1 for p in page_drawings(page)
+                          if is_apartment_fill(p, args.min_area)) or None
+            family = choose_label_family(text_label_candidates(page), n_fills, log)
+            if family:
+                labels = candidates_to_apartments(family, prefix)
+                source = "текст PDF, схему виведено"
 
     apts, missing, orphans, mode_used = [], [], 0, None
     if labels and args.mode in ("auto", "vector"):
@@ -1198,6 +1354,14 @@ def cut_page(page, img_getter, args, tess, page_no=1, name_floor=None, log=print
                 log("    розпізнаю підписи квартир (OCR)…")
                 labels = ocr_labels(img_work, tess, prefix, px_per_pt, args.ocr_tiles)
                 source = "OCR"
+                if not labels:
+                    log("    жоден відомий формат підпису не підійшов — "
+                        "виводжу схему з креслення…")
+                    family = choose_label_family(
+                        ocr_label_candidates(img_work, tess, px_per_pt), None, log)
+                    if family:
+                        labels = candidates_to_apartments(family, prefix)
+                        source = "OCR, схему виведено"
         if not labels:
             log("    !! підписів квартир не знайдено — сторінку пропущено")
             info["error"] = "no-labels"
