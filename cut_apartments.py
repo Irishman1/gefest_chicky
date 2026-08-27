@@ -1167,6 +1167,25 @@ def colour_classes(rgb: np.ndarray, fill: np.ndarray, tol: float = 40.0,
     return classes, palette
 
 
+def count_fill_blobs(rgb: np.ndarray, args, min_frac: float = 0.2) -> int:
+    """
+    Скільки на аркуші кольорових плям, схожих на квартиру.
+
+    Груба, але незалежна оцінка: стільки приблизно має бути й підписів. Потрібна,
+    щоб перевірити, чи заслуговує довіри те, що прочитав OCR — одна випадкова
+    знахідка на аркуші з двома десятками квартир довіри не заслуговує.
+    """
+    fill = colored_fill_mask(rgb, args.sat, args.dark)
+    lab, n = ndi.label(fill, structure=np.ones((3, 3), bool))
+    if not n:
+        return 0
+    sizes = np.bincount(lab.ravel())[1:]
+    big = sizes[sizes > sizes.max() * 0.02]
+    if big.size == 0:
+        return 0
+    return int((sizes >= max(float(np.median(big)) * min_frac, 1.0)).sum())
+
+
 def zone_premises(rgb: np.ndarray, labels: list, args, px_per_pt: float, log=print):
     """
     Нарізка за кольоровими зонами — для планів із виносками «№N».
@@ -1543,13 +1562,19 @@ def cut_page(page, img_getter, args, tess, page_no=1, name_floor=None, log=print
                 log("    розпізнаю підписи квартир (OCR)…")
                 labels = ocr_labels(img_work, tess, prefix, px_per_pt, args.ocr_tiles)
                 source = "OCR"
-                if not labels:
-                    log("    жоден відомий формат підпису не підійшов — "
-                        "виводжу схему з креслення…")
+
+                # Скільки кольорових плям — стільки приблизно й квартир. Якщо
+                # відомі формати підпису дали помітно менше, вірити їм не варто:
+                # або формат тут інший, або те, що знайшлось, — випадковість.
+                blobs = count_fill_blobs(np.asarray(img_work.convert("RGB")), args)
+                if len(labels) < 0.5 * blobs:
+                    log(f"    підписів {len(labels)} на {blobs} кольорових плям — "
+                        f"замало; виводжу схему підпису з креслення…")
                     family = choose_label_family(
-                        ocr_label_candidates(img_work, tess, px_per_pt), None, log)
-                    if family:
-                        labels = candidates_to_apartments(family, prefix)
+                        ocr_label_candidates(img_work, tess, px_per_pt), blobs, log)
+                    inferred = candidates_to_apartments(family, prefix)
+                    if len(inferred) > len(labels):
+                        labels = inferred
                         source = "OCR, схему виведено"
         if not labels:
             log("    !! підписів квартир не знайдено — сторінку пропущено")
