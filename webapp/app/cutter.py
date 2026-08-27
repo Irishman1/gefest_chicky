@@ -44,7 +44,8 @@ def file_name(project_name: str, floor: int | str, number: str, ext: str = ".png
 
 
 def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: int,
-              log=None, dpi: int = 300, bg: str = "white") -> dict:
+              log=None, dpi: int = 300, bg: str = "white",
+              kind: str = "flats") -> dict:
     """Режет первую страницу PDF. Возвращает данные для базы."""
     lines: list[str] = []
 
@@ -59,7 +60,12 @@ def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: in
         shutil.rmtree(apt_dir)
     apt_dir.mkdir(parents=True, exist_ok=True)
 
-    args = ca.default_args(dpi=dpi, bg=bg, floor=str(floor_number))
+    # Тип объекта задаёт пользователь при создании проекта. Жильё и офисы
+    # устроены по-разному: у квартир границу держат стены, у офисов —
+    # цвет заливки, и угадывать это по чертежу ненадёжно.
+    mode = "zone" if kind == "offices" else "auto"
+    what = "офисов" if kind == "offices" else "квартир"
+    args = ca.default_args(dpi=dpi, bg=bg, floor=str(floor_number), mode=mode)
     tess = ca.find_tesseract()
 
     doc = fitz.open(pdf_path)
@@ -76,10 +82,14 @@ def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: in
                                         name_floor=str(floor_number), log=say)
         if not apts:
             reason = {
-                "no-labels": "не найдены подписи квартир (нужен текстовый слой или скан получше)",
-                "no-fills": "не найдены цветные заливки квартир",
-                "no-apartments": "квартиры не распознаны",
-            }.get(info.get("error"), "квартиры не распознаны")
+                "no-labels": (f"не найдены подписи ({what}). Для офисов нужны выноски "
+                              f"«№N» с полей листа — проверьте, тот ли тип объекта выбран"
+                              if kind == "offices" else
+                              "не найдены подписи квартир (нужен текстовый слой или скан получше)"),
+                "no-zones": "не найдены цветные зоны помещений — это не похоже на офисный план",
+                "no-fills": f"не найдены цветные заливки ({what})",
+                "no-apartments": f"{what} не распознаны",
+            }.get(info.get("error"), f"{what} не распознаны")
             return {"ok": False, "message": reason, "log": "\n".join(lines),
                     "apartments": []}
 
@@ -124,6 +134,6 @@ def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: in
 
         return {"ok": True, "apartments": records, "log": "\n".join(lines),
                 "mode": info["mode"],
-                "message": f"Готово: квартир {len(records)}"}
+                "message": f"Готово: {what} {len(records)}"}
     finally:
         doc.close()

@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS projects (
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name       TEXT NOT NULL,
     floors     INTEGER NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'flats',   -- flats | offices
     created_at INTEGER NOT NULL
 );
 
@@ -100,6 +101,13 @@ def connect() -> sqlite3.Connection:
 def init() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        # Проекты, созданные до появления выбора типа, считаем жилыми:
+        # раньше сайт умел резать только их.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)")}
+        if "kind" not in cols:
+            conn.execute("ALTER TABLE projects ADD COLUMN kind TEXT NOT NULL "
+                         "DEFAULT 'flats'")
+        conn.commit()
 
 
 def query(sql: str, args: tuple = ()) -> list[sqlite3.Row]:

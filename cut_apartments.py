@@ -78,6 +78,7 @@ class Apartment:
     paths: list = field(default_factory=list)   # векторний режим
     rect: fitz.Rect = None
     mask: np.ndarray = None                     # растровий режим
+    via_leader: bool = False                    # підпис прийшов виноскою «№N»
 
 
 # =========================================================== геометрія / утиліти
@@ -516,7 +517,10 @@ def find_text_labels(page, prefix):
                                 round(span["size"], 1)))
 
     if numbered:
-        trusted.extend(_labels_from_leaders(page, numbered, prefix))
+        from_leaders = _labels_from_leaders(page, numbered, prefix)
+        for a in from_leaders:
+            a.via_leader = True         # позначка для зонального розбору
+        trusted.extend(from_leaders)
 
     if not bare:
         return trusted
@@ -1111,6 +1115,105 @@ def raster_apartments(rgb: np.ndarray, labels: list, args, px_per_pt: float, nam
     return bodies, missing, orphans, coverage
 
 
+# ======================================================= зонування за кольором
+#
+# Офісні поверхи влаштовані інакше за житлові. Приміщення там відкриті: стін
+# між робочими зонами немає, а межу тримає лише колір заливки — за легендою
+# аркуша це «офісні приміщення» двох відтінків і «приміщення громадського
+# призначення». Підписані вони не всередині, а виносками «№N» з полів.
+#
+# Розбір за стінами на таких кресленнях провалюється двічі: заливки різних
+# зон стикаються без стіни й зливаються в один ком на весь поверх, а контур
+# меблів (стіл для нарад із чорною обводкою) навпаки виглядає окремою
+# кімнатою — виноска, що вказує на стіл, вирізає стіл замість офісу.
+
+
+def colour_classes(rgb: np.ndarray, fill: np.ndarray, tol: float = 40.0,
+                   min_share: float = 0.02):
+    """
+    Розкладає зафарбовані пікселі на класи за кольором.
+
+    Палітру не зашиваємо — збираємо з самого аркуша: беремо переважні кольори
+    заливки й зливаємо ті, що ближчі за tol. Повертає (класи, палітра), де
+    класи — int-масив (0 = поза заливкою), палітра — список кольорів.
+    """
+    px = rgb[fill]
+    if px.size == 0:
+        return np.zeros(fill.shape, np.int32), []
+
+    step = 12
+    q = (px // step * step).astype(np.int32)
+    keys, counts = np.unique(q.reshape(-1, 3), axis=0, return_counts=True)
+    order = np.argsort(counts)[::-1]
+    total = counts.sum()
+
+    palette = []
+    for i in order:
+        if counts[i] < min_share * total:
+            break
+        c = keys[i].astype(float)
+        if all(np.linalg.norm(c - p) > tol for p in palette):
+            palette.append(c)
+    if not palette:
+        palette = [keys[order[0]].astype(float)]
+
+    ys, xs = np.nonzero(fill)
+    d = np.stack([np.linalg.norm(px.astype(float) - p, axis=1) for p in palette])
+    nearest = d.argmin(axis=0) + 1
+    nearest[d.min(axis=0) > tol * 2] = 0        # чужий колір — ні до чого не тулимо
+
+    classes = np.zeros(fill.shape, np.int32)
+    classes[ys, xs] = nearest
+    return classes, palette
+
+
+def zone_premises(rgb: np.ndarray, labels: list, args, px_per_pt: float, log=print):
+    """
+    Нарізка за кольоровими зонами — для планів із виносками «№N».
+
+    Кожне приміщення — суцільна пляма свого кольору. Тонкі обводки меблів
+    усередині зони замикаємо, щоб стіл чи шафа не ділили офіс навпіл; стіни
+    між зонами товщі за обводку й переживають замикання. Зони без виноски
+    (сходи, коридори, тераси) не отримують підпису й у нарізку не йдуть.
+    """
+    fill = colored_fill_mask(rgb, args.sat, args.dark)
+    classes, palette = colour_classes(rgb, fill)
+    if not palette:
+        return [], [a.label for a in labels], 0, float(fill.mean())
+
+    bridge = max(int(round(args.zone_bridge * px_per_pt)), 1)
+    comp = np.zeros(fill.shape, np.int32)
+    offset = 0
+    for k in range(1, len(palette) + 1):
+        m = classes == k
+        if not m.any():
+            continue
+        m = ndi.binary_closing(m, disk(bridge))
+        lab, n = ndi.label(m, structure=np.ones((3, 3), bool))
+        if n:
+            comp[lab > 0] = lab[lab > 0] + offset
+            offset += n
+
+    taken, bodies, missing = {}, [], []
+    for a in labels:
+        r = seed_component(comp, a, int(round(8 * px_per_pt)))
+        if not r:
+            missing.append(a.label)
+            continue
+        if r in taken:
+            log(f"    !! {a.label} і {taken[r]} вказують на одну зону — "
+                f"на кресленні їх нічим не розділити")
+            missing.append(a.label)
+            continue
+        taken[r] = a.label
+        a.mask = ndi.binary_fill_holes(comp == r)   # меблі всередині — теж офіс
+        bodies.append(a)
+
+    log(f"    зон за кольором: {offset} у {len(palette)} відтінках, "
+        f"підписів {len(labels)}, приміщень {len(bodies)}")
+    return bodies, missing, 0, float(fill.mean())
+
+
 def ink_mask(rgb: np.ndarray, white_lvl: int = 244) -> np.ndarray:
     """Усе, що намальовано: лінії, стіни, меблі, символи, текст (не білий фон)."""
     return rgb.min(2) < white_lvl
@@ -1371,7 +1474,41 @@ def cut_page(page, img_getter, args, tess, page_no=1, name_floor=None, log=print
                 source = "текст PDF, схему виведено"
 
     apts, missing, orphans, mode_used = [], [], 0, None
-    if labels and args.mode in ("auto", "vector"):
+
+    if args.mode == "zone" and not any(a.via_leader for a in labels):
+        log("    !! на аркуші немає виносок «№N» — нічого різати як офіси")
+        info["error"] = "no-labels"
+        return [], [], info
+
+    # Виноски «№N» з полів — офісна розмітка: приміщення там розділені не
+    # стінами, а кольором заливки, тож і різати треба по зонах.
+    # Поруч із «№N» часто підписана площа ("28,50"), і вона теж розбирається як
+    # підпис. Авторитетні тут саме виноски — беремо тільки їх, решту відкидаємо.
+    leaders = [a for a in labels if a.via_leader]
+    if leaders and args.mode in ("auto", "zone"):
+        labels = leaders
+        work_dpi = args.work_dpi
+        img_work = img_getter(work_dpi)
+        px_per_pt = work_dpi / 72.0
+        in_points = [a.point for a in labels]        # щоб відкотити, якщо не вийде
+        for a in labels:
+            a.paths, a.rect = [], None
+            a.point = (a.point[0] * px_per_pt, a.point[1] * px_per_pt)
+        rgb = np.asarray(img_work.convert("RGB"))
+        log("    підписи виносками «№N» — розбираю за кольоровими зонами")
+        apts, missing, orphans, _cov = zone_premises(rgb, labels, args, px_per_pt, log)
+        if apts:
+            mode_used = "zone"
+        elif args.mode == "zone":
+            log("    !! зон за кольором не знайдено — це не схоже на офісний план")
+            info["error"] = "no-zones"
+            return [], [], info
+        else:
+            log("    зонами не вийшло — повертаюсь до звичайного розбору")
+            for a, pt in zip(labels, in_points):
+                a.point, a.mask = pt, None
+
+    if mode_used is None and labels and args.mode in ("auto", "vector"):
         # Скільки заливок припадає на один підпис? Якщо квартира намальована
         # однією заливкою (1-3 на підпис) - векторний розбір точний. Якщо ж
         # кімнату складено з десятків смужок, "заливка під підписом" вихоплює
@@ -1551,8 +1688,10 @@ def build_parser():
     ap.add_argument("--bg", choices=["white", "transparent", "jpg"], default="white",
                     help="фон: прозорий PNG, білий PNG або JPG")
     ap.add_argument("--quality", type=int, default=92, help="якість для --bg jpg")
-    ap.add_argument("--mode", choices=["auto", "vector", "raster"], default="auto",
-                    help="як розбирати план")
+    ap.add_argument("--mode", choices=["auto", "vector", "raster", "zone"],
+                    default="auto",
+                    help="як розбирати план; zone — офісні поверхи, де межу "
+                         "приміщення тримає колір заливки, а не стіни")
     ap.add_argument("--work-dpi", type=int, default=200,
                     help="роздільна здатність аналізу в режимі raster")
     ap.add_argument("--dilate", type=float, default=16.0,
@@ -1566,6 +1705,9 @@ def build_parser():
     ap.add_argument("--padding", type=float, default=6.0, help="поле навколо квартири, пункти")
     ap.add_argument("--attach-gap", type=float, default=25.0,
                     help="макс. відстань (пункти), на якій балкон вважається частиною квартири")
+    ap.add_argument("--zone-bridge", type=float, default=2.5,
+                    help="радіус (пункти), яким замикаються тонкі обводки меблів "
+                         "усередині кольорової зони (режим планів із виносками «№N»)")
     ap.add_argument("--attach-colour", "--attach-color", type=float, default=40.0,
                     dest="attach_colour",
                     help="макс. різниця кольору (RGB 0..255), при якій шматок ще "

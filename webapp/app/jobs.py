@@ -58,7 +58,8 @@ def _worker() -> None:
 
 
 def _run(floor_id: int) -> None:
-    floor = db.one("SELECT f.*, p.name AS project_name, p.id AS pid "
+    floor = db.one("SELECT f.*, p.name AS project_name, p.id AS pid, "
+                   "p.kind AS project_kind "
                    "FROM floors f JOIN projects p ON p.id = f.project_id WHERE f.id=?",
                    (floor_id,))
     if not floor:
@@ -74,7 +75,8 @@ def _run(floor_id: int) -> None:
                "WHERE id=?", (db.now(), floor_id))
     log.info("Нарезка: проект %s, этаж %s", floor["project_name"], floor["number"])
 
-    result = cut_floor(pdf, d, floor["project_name"], floor["number"])
+    result = cut_floor(pdf, d, floor["project_name"], floor["number"],
+                       kind=floor["project_kind"] or "flats")
 
     db.execute("DELETE FROM apartments WHERE floor_id=?", (floor_id,))
     if result["ok"]:

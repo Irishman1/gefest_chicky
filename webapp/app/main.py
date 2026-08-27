@@ -238,17 +238,22 @@ def projects(request: Request, user=Depends(require_user)):
 
 @app.post("/projects")
 def create_project(request: Request, name: str = Form(...), floors: int = Form(...),
-                   user=Depends(require_user)):
+                   kind: str = Form(...), user=Depends(require_user)):
     name = name.strip()
     if not name:
         raise HTTPException(400, "Укажите название объекта")
+    # Тип задаётся явно: жильё и офисы режутся по-разному, и определять это
+    # по чертежу — гадание, из-за которого офисы резались неверно.
+    if kind not in ("flats", "offices"):
+        raise HTTPException(400, "Выберите тип объекта: квартиры или офисы")
     floors = max(1, min(int(floors), 200))
-    pid = db.execute("INSERT INTO projects (user_id, name, floors, created_at) "
-                     "VALUES (?,?,?,?)", (user["id"], name, floors, db.now()))
+    pid = db.execute("INSERT INTO projects (user_id, name, floors, kind, created_at) "
+                     "VALUES (?,?,?,?,?)", (user["id"], name, floors, kind, db.now()))
     for n in range(1, floors + 1):
         db.execute("INSERT INTO floors (project_id, number, status, updated_at) "
                    "VALUES (?,?,'empty',?)", (pid, n, db.now()))
-    db.log_action(user, "project.create", f"{name} ({floors} эт.)")
+    db.log_action(user, "project.create",
+                  f"{name} ({floors} эт., {'офисы' if kind == 'offices' else 'квартиры'})")
     return RedirectResponse(f"/projects/{pid}", status_code=303)
 
 

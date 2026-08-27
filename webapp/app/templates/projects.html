@@ -19,6 +19,13 @@
       <label for="np-floors">Этажей</label>
       <input id="np-floors" type="number" name="floors" min="1" max="200" value="12" required>
     </div>
+    <div class="field-kind">
+      <label>Что режем</label>
+      <div class="choice">
+        <label class="opt"><input type="radio" name="kind" value="flats" required>Квартиры</label>
+        <label class="opt"><input type="radio" name="kind" value="offices" required>Офисы</label>
+      </div>
+    </div>
     <button class="primary" type="submit">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
       Создать
@@ -36,12 +43,13 @@
         <a class="tile" href="/projects/{{ p['id'] }}">
           <div class="tile-top">
             <h3>{{ p["name"] }}</h3>
+            <span class="kind">{{ "офисы" if p["kind"] == "offices" else "квартиры" }}</span>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
           </div>
           <div class="tile-stats">
             <div class="stat"><span>этажей</span><b>{{ p["floors"] }}</b></div>
             <div class="stat"><span>нарезано</span><b>{{ p["ready"] }}</b></div>
-            <div class="stat"><span>квартир</span><b>{{ p["flats"] }}</b></div>
+            <div class="stat"><span>{{ "офисов" if p["kind"] == "offices" else "квартир" }}</span><b>{{ p["flats"] }}</b></div>
           </div>
           <div class="bar {% if pct >= 100 %}full{% endif %}"><i style="width:{{ pct }}%"></i></div>
         </a>

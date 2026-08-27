@@ -4,7 +4,7 @@
 
 <div class="page-head">
   <div>
-    <h1>{{ project["name"] }}</h1>
+    <h1>{{ project["name"] }} <span class="kind">{{ "офисы" if project["kind"] == "offices" else "квартиры" }}</span></h1>
     <p class="lede">{{ project["floors"] }} этажей. Выберите этаж ниже и загрузите PDF плана.</p>
   </div>
   <div class="actions">
@@ -72,7 +72,7 @@
 
     {% if floor["status"] == "done" and apartments %}
       <p class="lede" style="margin-top:14px">
-        Наведите на квартиру — она подсветится. Нажмите, чтобы скачать именно её.
+        Наведите на {{ "офис" if project["kind"] == "offices" else "квартиру" }} — {{ "он подсветится" if project["kind"] == "offices" else "она подсветится" }}. Нажмите, чтобы скачать.
       </p>
       <div id="viewer" class="viewer" data-floor="{{ floor['id'] }}"
            data-status="{{ floor['status'] }}"
