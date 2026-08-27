@@ -24,7 +24,7 @@ from . import db, jobs, security
 # Логин: латиница ИЛИ кириллица, цифры и . _ - — люди пишут своё имя
 # по-русски и по-украински, и отказ по «только латиница» их стопорил.
 USERNAME_RE = re.compile(r"^[a-zA-Zа-яА-ЯёЁіІїЇєЄґҐ0-9_.\-]{3,32}$")
-from .cutter import apply_edits, safe_part
+from .cutter import apply_edits, make_thumb, safe_part
 from .storage import apartments_dir, ensure, floor_dir, project_dir, thumbs_dir
 
 BASE = Path(__file__).resolve().parent
@@ -505,7 +505,15 @@ def apartment_thumb(floor_id: int, name: str, request: Request,
     full = apartments_dir(floor["pid"], floor_id) / row["filename"]
     if not full.exists():
         raise HTTPException(404, "Файл не найден")
-    return FileResponse(full)
+    # Этажи, нарезанные до появления миниатюр, своей папки thumbs не имеют.
+    # Делаем миниатюру на месте и кладём рядом — иначе список этажа тянул бы
+    # десятки полноразмерных PNG.
+    try:
+        make_thumb(full, small.parent)
+        return FileResponse(small)
+    except Exception:                                # noqa: BLE001
+        log.warning("Не удалось сделать миниатюру для %s", full, exc_info=True)
+        return FileResponse(full)
 
 
 def content_disposition(filename: str) -> str:
