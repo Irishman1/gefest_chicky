@@ -266,6 +266,47 @@ def is_apartment_fill(path, min_area, gray_tol=0.006, white_lvl=0.98):
     return path["rect"].get_area() >= min_area
 
 
+def _rgb255(fill):
+    """Колір заливки PDF (0..1) у звичні 0..255."""
+    if not fill or len(fill) < 3:
+        return None
+    return np.array([c * 255.0 for c in fill[:3]], float)
+
+
+def dominant_fill_colour(paths):
+    """Колір квартири — колір її найбільшої заливки."""
+    best, best_area = None, -1.0
+    for p in paths:
+        c = _rgb255(p.get("fill"))
+        if c is None:
+            continue
+        area = p["rect"].get_area()
+        if area > best_area:
+            best, best_area = c, area
+    return best
+
+
+def mask_fill_colour(rgb, mask):
+    """Медіанний колір зафарбованих пікселів шматка."""
+    px = rgb[mask]
+    if px.size == 0:
+        return None
+    return np.median(px.reshape(-1, 3), axis=0).astype(float)
+
+
+def same_fill_colour(a, b, tol):
+    """
+    Чи одного кольору шматок і квартира.
+
+    Балкон і лоджія зафарбовані разом із квартирою, тож колір у них той самий.
+    Самостійне приміщення поруч (комора, СПД, ліфтовий вузол) має свій колір —
+    приклеювати його до сусідньої квартири не можна, навіть якщо воно впритул.
+    """
+    if a is None or b is None:
+        return True                    # немає з чим порівнювати — не заважаємо
+    return float(np.linalg.norm(a - b)) <= tol
+
+
 def paths_to_mask(page_rect, paths, dpi, clip=None):
     """Малює контури заливок і повертає булеву маску (True = всередині)."""
     doc = fitz.open()
@@ -560,6 +601,10 @@ def vector_apartments(page, labels, args):
     own_area = {id(a): sum(pp["rect"].get_area() for pp in a.paths) for a in bodies}
     added_area = {id(a): 0.0 for a in bodies}
     area_cap = 2.0
+    # Кольором тут не користуємось. На офісних планах відтінок лише розділяє
+    # сусідів (№1 рожевий, №2 синій, №3 рожевий...) і нічого не каже про те,
+    # де закінчується приміщення: частини одного офісу бувають різних тонів.
+    # Перевірка кольору лишається в растровому розборі житлових планів.
 
     remaining = list(unassigned)
     while remaining:
@@ -1040,6 +1085,7 @@ def raster_apartments(rgb: np.ndarray, labels: list, args, px_per_pt: float, nam
             owned[a.mask] = i
         dist2, (jy, jx) = ndi.distance_transform_edt(owned == 0, return_indices=True)
         near_owner = owned[jy, jx]
+        body_colour = [mask_fill_colour(rgb, a.mask & fill) for a in bodies]
         for members in leftovers:
             piece = np.isin(rooms, members)
             cand = near_owner[piece]
@@ -1050,6 +1096,12 @@ def raster_apartments(rgb: np.ndarray, labels: list, args, px_per_pt: float, nam
                 continue
             winner = int(np.bincount(cand).argmax())
             if winner == 0:
+                orphans += 1
+                continue
+            # Близькість — ще не привід: комора чи ліфтовий вузол упритул до
+            # квартири зафарбовані своїм кольором, і в квартиру не входять.
+            if not same_fill_colour(mask_fill_colour(rgb, piece & fill),
+                                    body_colour[winner - 1], args.attach_colour):
                 orphans += 1
                 continue
             bodies[winner - 1].mask = bodies[winner - 1].mask | piece
@@ -1455,7 +1507,8 @@ def process_page(page, img_getter, page_no, out_dir, args, tess, name_floor):
         print(f"      !! без заливки (не вирізано): {', '.join(info['missing'])}")
     if info["orphans"]:
         print(f"      i  залишились незакріплені заливки ({info['orphans']}) — зазвичай "
-              f"це легенда/умовні позначення; якщо це балкони, збільшіть --attach-gap")
+              f"це легенда, комори чи ліфтовий вузол; якщо це балкони, "
+              f"збільшіть --attach-gap, а коли вони іншого відтінку — --attach-colour")
     return saved
 
 
@@ -1513,6 +1566,11 @@ def build_parser():
     ap.add_argument("--padding", type=float, default=6.0, help="поле навколо квартири, пункти")
     ap.add_argument("--attach-gap", type=float, default=25.0,
                     help="макс. відстань (пункти), на якій балкон вважається частиною квартири")
+    ap.add_argument("--attach-colour", "--attach-color", type=float, default=40.0,
+                    dest="attach_colour",
+                    help="макс. різниця кольору (RGB 0..255), при якій шматок ще "
+                         "вважається частиною квартири; більша різниця означає "
+                         "самостійне приміщення (комора, ліфтовий вузол)")
     ap.add_argument("--min-area", type=float, default=300.0,
                     help="vector: мін. площа заливки (кв. пункти)")
     ap.add_argument("--close", type=float, default=5.0,
