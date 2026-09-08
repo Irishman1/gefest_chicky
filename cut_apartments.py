@@ -1485,7 +1485,8 @@ def solid_blocks(rgb: np.ndarray) -> np.ndarray:
     return ndi.binary_opening(blocks, structure=square(3))
 
 
-def expand_masks(masks, rgb, dilate_px, snap_area_px, smooth_px):
+def expand_masks(masks, rgb, dilate_px, snap_area_px, smooth_px,
+                 span_px=0.0, reach_px=0.0):
     """
     Добудовує маски квартир до готового кадру.
 
@@ -1540,7 +1541,55 @@ def expand_masks(masks, rgb, dilate_px, snap_area_px, smooth_px):
     for i, m in enumerate(out):
         clean = smooth_mask(m, int(round(smooth_px)), protect=masks[i])
         result.append(add_door_swings(clean, ink_solid, door_reach, door_area))
+
+    # Після згладжування, щоб воно не зрізало щойно добране назад.
+    result = keep_elements_whole(result, ink, snap_area_px, span_px, reach_px)
     return result
+
+
+# Наскільки далеко за межу заглядаємо в пошуках відрізаного хвоста, пункти.
+# Приблизно пів стіни: далі вже чуже приміщення.
+TAIL_REACH = 6.0
+
+
+def keep_elements_whole(out, ink, area_px, span_px, reach_px):
+    """
+    Останній рубіж: межа не повинна розрізати намальоване навпіл.
+
+    all_or_nothing бере компоненти всього аркуша, і на щільному кресленні воно
+    просто не спрацьовує: стіни, сантехніка й дрібні символи там злиті в одну
+    компоненту на пів мільйона пікселів, куди більшу за поріг. Кільце навколо
+    квартири теж не рятує - стіна замкнена по колу і знову дає одну компоненту.
+
+    Тому дивимось не на елементи, а на те, що від них відрізано: чорнило за
+    межею, у вузькій смузі вздовж неї. Там великий клубок нарешті розпадається
+    - хвіст символа виходить окремим компактним шматочком, а стіна лишається
+    довгою смугою. Компактне добираємо, довге лишаємо спільним.
+    """
+    if span_px <= 0 or reach_px <= 0:
+        return out
+    ring = disk(max(int(round(reach_px)), 1))
+    st = np.ones((3, 3), bool)
+    for i, m in enumerate(out):
+        tails = ink & ndi.binary_dilation(m, structure=ring) & ~m
+        comp, n = ndi.label(tails, structure=st)
+        if not n:
+            continue
+        sizes = np.bincount(comp.ravel(), minlength=n + 1)
+        # Хвіст має саме продовжувати лінію, розрізану межею. Інакше в кадр
+        # налипають крихти, що просто опинились поряд, — і висять у порожнечі.
+        joined = np.bincount(comp[ndi.binary_dilation(ink & m, structure=st)],
+                             minlength=n + 1)
+        add = []
+        for box, k in zip(ndi.find_objects(comp), range(1, n + 1)):
+            if box is None or sizes[k] > area_px or not joined[k]:
+                continue
+            span = max(box[0].stop - box[0].start, box[1].stop - box[1].start)
+            if span <= span_px:
+                add.append(k)
+        if add:
+            out[i] = m | np.isin(comp, add)
+    return out
 
 
 def all_or_nothing(out, layer, snap_area_px, envelopes):
@@ -1838,7 +1887,8 @@ def cut_page(page, img_getter, args, tess, page_no=1, name_floor=None, log=print
             (mask_rgb.shape[1], mask_rgb.shape[0]), Image.NEAREST)) for m in masks]
     scale = mask_dpi / 72.0
     masks = expand_masks(masks, mask_rgb, args.dilate * scale,
-                         args.snap_area * scale * scale, args.smooth * scale)
+                         args.snap_area * scale * scale, args.smooth * scale,
+                         args.snap_span * scale, TAIL_REACH * scale)
 
     info.update({"mode": mode_used, "missing": missing, "orphans": orphans,
                  "labels": len(labels), "mask_dpi": mask_dpi,
@@ -1931,6 +1981,11 @@ def build_parser():
     ap.add_argument("--mask-dpi", type=int, default=150,
                     help="роздільна здатність, на якій рахується межа квартири")
     ap.add_argument("--padding", type=float, default=6.0, help="поле навколо квартири, пункти")
+    ap.add_argument("--snap-span", type=float, default=30.0,
+                    dest="snap_span",
+                    help="макс. розмір (пункти) цілісного елемента, який на межі "
+                         "добирається повністю; довше - це вже стіна, і вона "
+                         "лишається спільною")
     ap.add_argument("--attach-gap", type=float, default=25.0,
                     help="макс. відстань (пункти), на якій балкон вважається частиною квартири")
     ap.add_argument("--zone-bridge", type=float, default=2.5,
