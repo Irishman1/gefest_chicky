@@ -46,6 +46,11 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 # Вище цього номер поверху вже не поверх, а випадкове число з креслення.
 MAX_FLOOR = 200
 
+# Наскільки два кольори у векторі вважаються тим самим тоном (RGB 0..255).
+# Заливки в PDF точні, тож поріг маленький — він відрізняє «та сама заливка»
+# від «сусідній відтінок палітри».
+SAME_TINT = 10.0
+
 # Підпис квартири: "А-12.1", "К-3.15", "A-12,1". Перший символ може не
 # розпізнатись зі шрифту PDF (�) або бути прочитаний OCR як латиниця — не біда.
 # \u0427\u0430\u0441\u0442\u0438\u043d\u0430 \u043f\u0440\u043e\u0454\u043a\u0442\u0456\u0432 \u043f\u0438\u0448\u0435 \u043f\u0456\u0434\u043f\u0438\u0441 \u0431\u0435\u0437 \u0434\u0435\u0444\u0456\u0441\u0430: "\u04103.9", "\u041a 3.1". \u0422\u043e\u043c\u0443 \u0434\u0435\u0444\u0456\u0441
@@ -310,6 +315,47 @@ def same_fill_colour(a, b, tol):
     if a is None or b is None:
         return True                    # немає з чим порівнювати — не заважаємо
     return float(np.linalg.norm(a - b)) <= tol
+
+
+def legend_swatches(paths, size_tol=2.5, align_tol=2.0):
+    """
+    Плашки «умовних позначень» серед заливок.
+
+    Легенду малюють так само, як квартиру: кольоровий прямокутник із рамкою.
+    Коли її ставлять не на полях, а всередині контуру будинку, найближча
+    квартира підхоплює її як балкон — і плашки приїжджають у вирізку.
+
+    Впізнаємо не за місцем, а за поведінкою: легенда — це кілька однакових
+    за розміром прямокутників, вишикуваних у стовпчик (або рядок) і залитих
+    *різними* кольорами. Балкони так не стоять ніколи: однакові балкони на
+    фасаді мають однаковий колір, а різнокольорові — різний розмір.
+    """
+    rest, groups = list(paths), []
+    while rest:
+        head = rest.pop()
+        r0 = head["rect"]
+        group = [head]
+        for other in list(rest):
+            r = other["rect"]
+            if (abs(r.width - r0.width) <= size_tol
+                    and abs(r.height - r0.height) <= size_tol):
+                group.append(other)
+                rest.remove(other)
+        groups.append(group)
+
+    out = []
+    for group in groups:
+        if len(group) < 3:
+            continue
+        colours = {tuple(np.round(_rgb255(g.get("fill")), 0)) for g in group
+                   if g.get("fill") is not None}
+        if len(colours) < 2:
+            continue
+        xs = {round(g["rect"].x0 / align_tol) for g in group}
+        ys = {round(g["rect"].y0 / align_tol) for g in group}
+        if len(xs) == 1 or len(ys) == 1:          # стовпчик або рядок
+            out.extend(group)
+    return out
 
 
 def paths_to_mask(page_rect, paths, dpi, clip=None):
@@ -578,28 +624,42 @@ def find_text_labels(page, prefix):
     """
     rm = page.rotation_matrix if page.rotation else None
     trusted, bare, numbered = [], [], []
+
+    def take(text, bbox, size):
+        """Розбирає один шматок тексту. True — щось упізнали."""
+        if rm is not None:
+            bbox = bbox * rm
+        parsed = parse_label(text, prefix)
+        if parsed:
+            label, floor, num = parsed
+            trusted.append(Apartment(label, floor, num,
+                                     ((bbox.x0 + bbox.x1) / 2,
+                                      (bbox.y0 + bbox.y1) / 2)))
+            return True
+        nm = NUMBER_LABEL_RE.match(text)
+        if nm:
+            numbered.append((nm.group(1), bbox))
+            return True
+        bm = BARE_LABEL_RE.match(text)
+        if bm:
+            bare.append((bm.group(1), bm.group(2), tuple(bbox), round(size, 1)))
+            return True
+        return False
+
     for block in page.get_text("dict")["blocks"]:
         for line in block.get("lines", []):
-            for span in line["spans"]:
-                text = span["text"]
-                bbox = fitz.Rect(span["bbox"])
-                if rm is not None:
-                    bbox = bbox * rm
-                parsed = parse_label(text, prefix)
-                if parsed:
-                    label, floor, num = parsed
-                    trusted.append(Apartment(label, floor, num,
-                                             ((bbox.x0 + bbox.x1) / 2,
-                                              (bbox.y0 + bbox.y1) / 2)))
-                    continue
-                nm = NUMBER_LABEL_RE.match(text)
-                if nm:
-                    numbered.append((nm.group(1), bbox))
-                    continue
-                bm = BARE_LABEL_RE.match(text)
-                if bm:
-                    bare.append((bm.group(1), bm.group(2), tuple(bbox),
-                                round(span["size"], 1)))
+            spans = line["spans"]
+            hit = False
+            for span in spans:
+                if take(span["text"], fitz.Rect(span["bbox"]), span["size"]):
+                    hit = True
+            if hit or len(spans) < 2:
+                continue
+            # Один підпис інколи розкладено на кілька спанів: "VII-", "18",
+            # ".17" — кожен окремо ні під що не підходить, і квартира тихо
+            # губиться. Якщо в рядку не впізнано нічого, пробуємо рядок цілком.
+            take("".join(sp["text"] for sp in spans), fitz.Rect(line["bbox"]),
+                 max(sp["size"] for sp in spans))
 
     if numbered:
         from_leaders = _labels_from_leaders(page, numbered, prefix)
@@ -657,6 +717,10 @@ def vector_apartments(page, labels, args):
 
     unassigned = [f for i, f in enumerate(fills) if i not in taken]
 
+    legend = legend_swatches(unassigned)
+    if legend:
+        unassigned = [f for f in unassigned if f not in legend]
+
     # Деякі плани малюють підпис за 1-3pt від межі його заливки, а не строго
     # всередині (частіше трапляється в кутових приміщеннях зі скошеними
     # стінами). Для підписів, яким не дісталось власної заливки, пробуємо
@@ -690,10 +754,24 @@ def vector_apartments(page, labels, args):
     own_area = {id(a): sum(pp["rect"].get_area() for pp in a.paths) for a in bodies}
     added_area = {id(a): 0.0 for a in bodies}
     area_cap = 2.0
-    # Кольором тут не користуємось. На офісних планах відтінок лише розділяє
-    # сусідів (№1 рожевий, №2 синій, №3 рожевий...) і нічого не каже про те,
-    # де закінчується приміщення: частини одного офісу бувають різних тонів.
-    # Перевірка кольору лишається в растровому розборі житлових планів.
+
+    # Колір — перевага, а не заборона.
+    #
+    # На житловому плані відтінок означає тип квартири (студія, однокімнатна,
+    # двокімнатна), і балкон зафарбований разом зі своєю квартирою. Балкон
+    # однокімнатної, що межує зі студією, геометрично може торкатись студії
+    # навіть щільніше - і тоді дістається не тому власнику. Тож спершу
+    # розбираємо шматки до квартир свого кольору, а вже потім усі інші.
+    #
+    # Саме перевагою, бо на офісних планах відтінок лише розділяє сусідів
+    # (№1 рожевий, №2 синій...) і частини одного приміщення бувають різних
+    # тонів: там перевага просто ні для кого не спрацює, і все лишиться як було.
+    #
+    # Порівнюємо строго (SAME_TINT), а не з допуском --attach-colour: у векторі
+    # балкон залито тим самим кольором, що й квартиру, буква в букву, тоді як
+    # сусідні типи квартир на пастельній палітрі відрізняються менше, ніж на
+    # той допуск.
+    own_colour = {id(a): dominant_fill_colour(a.paths) for a in bodies}
 
     remaining = list(unassigned)
     while remaining:
@@ -701,6 +779,7 @@ def vector_apartments(page, labels, args):
         for i, path in enumerate(remaining):
             r = path["rect"]
             area = r.get_area()
+            colour = _rgb255(path.get("fill"))
             for a in bodies:
                 if added_area[id(a)] + area > own_area[id(a)] * area_cap:
                     continue
@@ -708,7 +787,8 @@ def vector_apartments(page, labels, args):
                 ovl = rect_overlap_area(r, a.rect)
                 if ovl <= 0 and gap > args.attach_gap:
                     continue
-                score = (ovl, contact_length(r, a.rect), -gap)
+                same = same_fill_colour(colour, own_colour[id(a)], SAME_TINT)
+                score = (same, ovl, contact_length(r, a.rect), -gap)
                 if best_score is None or score > best_score:
                     best_i, best_a, best_score = i, a, score
         if best_a is None:
@@ -722,7 +802,7 @@ def vector_apartments(page, labels, args):
     for a in bodies:
         a.rect = union_rect(a.paths)
     missing = [a.label for a in labels if not a.paths]
-    return bodies, missing, orphans, len(fills)
+    return bodies, missing, orphans, len(fills), len(legend)
 
 
 def union_rect(paths):
@@ -1658,11 +1738,15 @@ def cut_page(page, img_getter, args, tess, page_no=1, name_floor=None, log=print
         striped = args.mode == "auto" and fill_count / unique > 4
 
         if not striped:
-            apts, missing, orphans, nfills = vector_apartments(page, labels, args)
+            apts, missing, orphans, nfills, n_legend = vector_apartments(
+                page, labels, args)
             if apts:
                 mode_used = "vector"
                 log(f"    режим vector: підписів {len(labels)} ({source}), "
                     f"заливок {nfills}, квартир {len(apts)}")
+                if n_legend:
+                    log(f"      плашки умовних позначень ({n_legend}) "
+                        f"до квартир не приєднано")
         else:
             log(f"    креслення зі складеними заливками "
                 f"({fill_count} заливок на {unique} підписів) - беру растровий розбір")
