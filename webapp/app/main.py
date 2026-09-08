@@ -9,6 +9,7 @@ import logging
 import re
 import logging.handlers
 import os
+import secrets
 import zipfile
 from pathlib import Path
 
@@ -24,11 +25,17 @@ from . import db, jobs, security
 # Логин: латиница ИЛИ кириллица, цифры и . _ - — люди пишут своё имя
 # по-русски и по-украински, и отказ по «только латиница» их стопорил.
 USERNAME_RE = re.compile(r"^[a-zA-Zа-яА-ЯёЁіІїЇєЄґҐ0-9_.\-]{3,32}$")
-from .cutter import apply_edits, make_thumb, safe_part
+from .cutter import (MAX_FLOOR, apply_edits, extract_page, floor_from_filename,
+                     make_thumb, page_floors, safe_part)
 from .storage import apartments_dir, ensure, floor_dir, project_dir, thumbs_dir
 
 BASE = Path(__file__).resolve().parent
 MAX_PDF_MB = int(os.environ.get("MAX_PDF_MB", "40"))
+# Альбом на много этажей — обычная подача, поэтому за раз принимаем пачку
+# файлов и пачку листов в каждом. Верх нужен, чтобы одна загрузка не забила
+# очередь нарезки на полдня.
+MAX_UPLOAD_FILES = int(os.environ.get("MAX_UPLOAD_FILES", "30"))
+MAX_UPLOAD_PAGES = int(os.environ.get("MAX_UPLOAD_PAGES", "60"))
 
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
@@ -251,7 +258,7 @@ def create_project(request: Request, name: str = Form(...), floors: int = Form(.
     # по чертежу — гадание, из-за которого офисы резались неверно.
     if kind not in ("flats", "offices"):
         raise HTTPException(400, "Выберите тип объекта: квартиры или офисы")
-    floors = max(1, min(int(floors), 200))
+    floors = max(1, min(int(floors), MAX_FLOOR))
     pid = db.execute("INSERT INTO projects (user_id, name, floors, kind, created_at) "
                      "VALUES (?,?,?,?,?)", (user["id"], name, floors, kind, db.now()))
     for n in range(1, floors + 1):
@@ -273,7 +280,7 @@ def delete_project(project_id: int, request: Request, user=Depends(require_user)
 
 
 @app.get("/projects/{project_id}", response_class=HTMLResponse)
-def project_page(project_id: int, request: Request, floor: int = 0,
+def project_page(project_id: int, request: Request, floor: int = 0, note: str = "",
                  user=Depends(require_user)):
     proj = get_project(project_id, user)
     floors = db.query("SELECT * FROM floors WHERE project_id = ? ORDER BY number",
@@ -288,35 +295,142 @@ def project_page(project_id: int, request: Request, floor: int = 0,
               "filename": a["filename"],
               "box": [a["x0"], a["y0"], a["x1"], a["y1"]]} for a in apts]
     return page(request, "project.html", project=proj, floors=floors,
-                floor=current, apartments=apts, flats_json=flats)
+                floor=current, apartments=apts, flats_json=flats,
+                note=note[:400])
+
+
+def _ensure_floor(project_id: int, number: int):
+    """Этаж проекта; альбом может накрыть этажи, которых в проекте ещё нет."""
+    row = db.one("SELECT * FROM floors WHERE project_id=? AND number=?",
+                 (project_id, number))
+    if row:
+        return row
+    for n in range(1, number + 1):
+        db.execute("INSERT OR IGNORE INTO floors (project_id, number, status, "
+                   "updated_at) VALUES (?,?,'empty',?)", (project_id, n, db.now()))
+    db.execute("UPDATE projects SET floors=? WHERE id=? AND floors < ?",
+               (number, project_id, number))
+    return db.one("SELECT * FROM floors WHERE project_id=? AND number=?",
+                  (project_id, number))
+
+
+def _ranges(numbers) -> str:
+    """[14,15,16,19] -> \u00ab14\u201316, 19\u00bb \u2014 чтобы не перечислять двадцать этажей."""
+    out, start, prev = [], None, None
+    for n in sorted(set(numbers)):
+        if start is None:
+            start = prev = n
+        elif n == prev + 1:
+            prev = n
+        else:
+            out.append(str(start) if start == prev else f"{start}\u2013{prev}")
+            start = prev = n
+    if start is not None:
+        out.append(str(start) if start == prev else f"{start}\u2013{prev}")
+    return ", ".join(out)
 
 
 @app.post("/projects/{project_id}/floors/{number}/upload")
 async def upload_pdf(project_id: int, number: int, request: Request,
-                     pdf: UploadFile = File(...), user=Depends(require_user)):
+                     pdf: list[UploadFile] = File(...), user=Depends(require_user)):
+    """
+    Принимает один PDF или сразу несколько, и любой из них может быть альбомом
+    на много этажей.
+
+    Один лист — режем на выбранный этаж, как и раньше: человек уже указал его
+    в интерфейсе, спорить с ним по чертежу незачем. Листов больше одного —
+    этаж каждого определяем по самому чертежу (подписи квартир, потом надпись
+    в штампе), а те, где не вышло, раскладываем подряд.
+    """
     proj = get_project(project_id, user)
-    floor = db.one("SELECT * FROM floors WHERE project_id=? AND number=?",
-                   (project_id, number))
-    if not floor:
+    if not db.one("SELECT 1 FROM floors WHERE project_id=? AND number=?",
+                  (project_id, number)):
         raise HTTPException(404, "Этаж не найден")
-    if not (pdf.filename or "").lower().endswith(".pdf"):
-        raise HTTPException(400, "Нужен файл PDF")
 
-    data = await pdf.read()
-    if len(data) > MAX_PDF_MB * 1024 * 1024:
-        raise HTTPException(400, f"Файл больше {MAX_PDF_MB} МБ")
-    if not data.startswith(b"%PDF"):
-        raise HTTPException(400, "Это не похоже на PDF")
+    files = [f for f in pdf if (f.filename or "").strip()]
+    if not files:
+        raise HTTPException(400, "Выберите файл PDF")
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(400, f"За раз не больше {MAX_UPLOAD_FILES} файлов")
 
-    d = ensure(floor_dir(project_id, floor["id"]))
-    (d / "source.pdf").write_bytes(data)
-    db.execute("UPDATE floors SET pdf_name=?, status='queued', message='В очереди', "
-               "log=NULL, updated_at=? WHERE id=?",
-               (pdf.filename, db.now(), floor["id"]))
-    db.execute("DELETE FROM apartments WHERE floor_id=?", (floor["id"],))
-    jobs.enqueue(floor["id"])
-    db.log_action(user, "floor.upload", f"{proj['name']} эт.{number}: {pdf.filename}")
-    return RedirectResponse(f"/projects/{project_id}?floor={number}", status_code=303)
+    incoming = ensure(project_dir(project_id) / "incoming")
+    saved = []                              # (файл во временной папке, имя)
+    try:
+        for up in files:
+            name = up.filename or ""
+            if not name.lower().endswith(".pdf"):
+                raise HTTPException(400, f"«{name}» — нужен файл PDF")
+            data = await up.read()
+            if len(data) > MAX_PDF_MB * 1024 * 1024:
+                raise HTTPException(400, f"«{name}» больше {MAX_PDF_MB} МБ")
+            if not data.startswith(b"%PDF"):
+                raise HTTPException(400, f"«{name}» не похож на PDF")
+            tmp = incoming / f"{secrets.token_hex(8)}.pdf"
+            tmp.write_bytes(data)
+            saved.append((tmp, name))
+
+        sheets = []                     # (файл, имя, номер листа, найденный этаж)
+        for tmp, name in saved:
+            try:
+                found = page_floors(tmp)
+            except Exception:                            # noqa: BLE001
+                log.warning("PDF не читается: %s", name, exc_info=True)
+                raise HTTPException(400, f"«{name}» не читается как PDF")
+            if not found:
+                raise HTTPException(400, f"В «{name}» нет страниц")
+            # У однолистового файла этаж часто написан только в имени.
+            by_name = floor_from_filename(name) if len(found) == 1 else None
+            for i, fl in enumerate(found):
+                sheets.append((tmp, name, i, fl if fl is not None else by_name))
+        if len(sheets) > MAX_UPLOAD_PAGES:
+            raise HTTPException(400, f"За раз не больше {MAX_UPLOAD_PAGES} листов")
+
+        plan, skipped = [], []
+        if len(sheets) == 1:
+            tmp, name, i, _fl = sheets[0]
+            plan.append((number, tmp, name, i))
+        else:
+            nxt, taken = number, set()
+            for tmp, name, i, fl in sheets:
+                target = max(1, min(fl or nxt, MAX_FLOOR))
+                if target in taken:
+                    skipped.append(f"{name}, лист {i + 1}: этаж {target} "
+                                   f"в этой загрузке уже занят")
+                    continue
+                taken.add(target)
+                nxt = target + 1
+                plan.append((target, tmp, name, i))
+        if not plan:
+            raise HTTPException(400, "Ни один лист не удалось разложить по этажам")
+
+        single = len(plan) == 1
+        for target, tmp, name, i in plan:
+            floor = _ensure_floor(project_id, target)
+            d = ensure(floor_dir(project_id, floor["id"]))
+            extract_page(tmp, i, d / "source.pdf")
+            db.execute("UPDATE floors SET pdf_name=?, status='queued', "
+                       "message='В очереди', log=NULL, updated_at=? WHERE id=?",
+                       (name if single else f"{name} (лист {i + 1})",
+                        db.now(), floor["id"]))
+            db.execute("DELETE FROM apartments WHERE floor_id=?", (floor["id"],))
+            # Ручные правки сделаны по прежнему чертежу этого этажа — на новый
+            # их накладывать нельзя, лягут мимо.
+            db.execute("DELETE FROM floor_edits WHERE floor_id=?", (floor["id"],))
+            jobs.enqueue(floor["id"])
+
+        done = [t for t, *_rest in plan]
+        note = "" if single else f"Загружено листов: {len(done)} → этажи {_ranges(done)}."
+        if skipped:
+            note = (note + " Пропущено: " + "; ".join(skipped)).strip()
+        db.log_action(user, "floor.upload",
+                      f"{proj['name']}: листов {len(done)}, эт. {_ranges(done)}")
+        url = f"/projects/{project_id}?floor={min(done)}"
+        if note:
+            url += "&note=" + quote(note)
+        return RedirectResponse(url, status_code=303)
+    finally:
+        for tmp, _name in saved:
+            tmp.unlink(missing_ok=True)
 
 
 @app.post("/projects/{project_id}/floors/{number}/recut")
@@ -326,6 +440,8 @@ def recut(project_id: int, number: int, request: Request, user=Depends(require_u
                    (project_id, number))
     if not floor or not (floor_dir(project_id, floor["id"]) / "source.pdf").exists():
         raise HTTPException(400, "Сначала загрузите PDF")
+    if floor["status"] in ("queued", "working"):
+        raise HTTPException(400, "Этаж уже в очереди")
     jobs.enqueue(floor["id"])
     db.log_action(user, "floor.recut", f"{proj['name']} эт.{number}")
     return RedirectResponse(f"/projects/{project_id}?floor={number}", status_code=303)

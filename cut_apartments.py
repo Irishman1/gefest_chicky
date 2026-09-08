@@ -43,6 +43,9 @@ Image.MAX_IMAGE_PIXELS = None
 
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 
+# Вище цього номер поверху вже не поверх, а випадкове число з креслення.
+MAX_FLOOR = 200
+
 # Підпис квартири: "А-12.1", "К-3.15", "A-12,1". Перший символ може не
 # розпізнатись зі шрифту PDF (�) або бути прочитаний OCR як латиниця — не біда.
 # \u0427\u0430\u0441\u0442\u0438\u043d\u0430 \u043f\u0440\u043e\u0454\u043a\u0442\u0456\u0432 \u043f\u0438\u0448\u0435 \u043f\u0456\u0434\u043f\u0438\u0441 \u0431\u0435\u0437 \u0434\u0435\u0444\u0456\u0441\u0430: "\u04103.9", "\u041a 3.1". \u0422\u043e\u043c\u0443 \u0434\u0435\u0444\u0456\u0441
@@ -1540,6 +1543,40 @@ def ext_for(bg):
 def floor_from_name(path: Path):
     m = FLOOR_IN_NAME_RE.search(path.stem)
     return m.group(1) if m else None
+
+
+def page_floor(page):
+    """
+    Який поверх намальовано на сторінці. Потрібно альбомам, де в одному PDF
+    лежать десять поверхів поспіль.
+
+    Спершу голосують підписи квартир («VII-14.7» -> 14): їх на аркуші два
+    десятки, і саме вони визначають, що ми ріжемо. Якщо підписів немає або
+    вони не сходяться — беремо напис у штампі («План 14 поверху»). Напис
+    сам по собі ненадійний: поруч у тому ж штампі стоїть поверховість
+    будинку («26 поверхів»), і вона під той самий шаблон теж підходить.
+
+    Повертає int або None, якщо визначити не вдалось.
+    """
+    try:
+        text = page.get_text()
+    except Exception:                                    # noqa: BLE001
+        return None
+
+    votes = Counter(int(f) for _letter, f, _num in LOOSE_LABEL_RE.findall(text)
+                    if 0 < int(f) <= MAX_FLOOR)
+    if votes:
+        floor, hits = votes.most_common(1)[0]
+        # Площі та розмірні виноски теж пролазять у широкий шаблон, тож
+        # довіряємо лише впевненій більшості.
+        if hits >= 3 and hits >= 0.4 * sum(votes.values()):
+            return floor
+
+    captions = Counter(int(f) for f in FLOOR_IN_NAME_RE.findall(text)
+                       if 0 < int(f) <= MAX_FLOOR)
+    if captions:
+        return captions.most_common(1)[0][0]
+    return None
 
 
 def page_to_image(page, dpi):

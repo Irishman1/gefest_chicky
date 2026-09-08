@@ -5,7 +5,8 @@
 <div class="page-head">
   <div>
     <h1>{{ project["name"] }} <span class="kind">{{ "офисы" if project["kind"] == "offices" else "квартиры" }}</span></h1>
-    <p class="lede">{{ project["floors"] }} этажей. Выберите этаж ниже и загрузите PDF плана.</p>
+    <p class="lede">{{ project["floors"] }} этажей. Выберите этаж ниже и загрузите PDF плана —
+      или сразу альбом на несколько этажей: они разложатся сами.</p>
   </div>
   <div class="actions">
     <a class="btn" href="/download/project/{{ project['id'] }}">
@@ -33,6 +34,13 @@
   <span><i></i>без PDF</span>
 </div>
 
+{% if note %}
+  <div class="note" style="margin-top:18px">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8v.01"/></svg>
+    <span>{{ note }}</span>
+  </div>
+{% endif %}
+
 <div class="card flush" style="margin-top:22px">
   <div class="panel-head">
     <h2>Этаж {{ floor["number"] }}</h2>
@@ -46,9 +54,11 @@
     <div class="toolbar">
       <form method="post" enctype="multipart/form-data" class="row"
             action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/upload">
-        <input type="file" name="pdf" accept="application/pdf" required>
+        <input type="file" name="pdf" accept="application/pdf" multiple required>
         <button class="primary" type="submit">Загрузить и порезать</button>
       </form>
+      <span class="muted hint-inline">Можно несколько файлов и альбом на много
+        этажей — номер этажа берётся с чертежа</span>
 
       {% if floor["pdf_name"] %}
         <span class="file-tag" title="{{ floor['pdf_name'] }}">

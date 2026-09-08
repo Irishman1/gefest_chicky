@@ -305,6 +305,16 @@ button svg, .btn svg { flex: none; }
 }
 .error svg { flex: none; margin-top: 1px; }
 
+/* Итог загрузки альбома: сколько листов и на какие этажи легли. */
+.note {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 10px 12px; border-radius: var(--r-sm); font-size: 13px;
+  color: var(--accent-2); background: var(--accent-tint);
+  border: 1px solid var(--accent-line);
+}
+.note svg { flex: none; margin-top: 1px; }
+.hint-inline { font-size: 12.5px; max-width: 34ch; line-height: 1.35; }
+
 /* =========================================================================
    Статусы
    ========================================================================= */

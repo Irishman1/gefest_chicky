@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 import cut_apartments as ca  # noqa: E402
 
 PREVIEW_DPI = 110          # план для просмотра в браузере
+MAX_FLOOR = ca.MAX_FLOOR   # выше этого номер этажа — уже не этаж
 INVALID = '<>:"/\\|?*'
 
 
@@ -54,6 +55,37 @@ def make_thumb(src: Path, dst_dir: Path) -> None:
         im = im.copy()
     im.thumbnail((THUMB_MAX, THUMB_MAX), Image.LANCZOS)
     im.save(dst_dir / src.name, optimize=True)
+
+
+def page_floors(pdf_path: Path) -> list[int | None]:
+    """Какой этаж на какой странице. None — определить не удалось."""
+    doc = fitz.open(pdf_path)
+    try:
+        return [ca.page_floor(page) for page in doc]
+    finally:
+        doc.close()
+
+
+def floor_from_filename(name: str) -> int | None:
+    """«12 поверх.pdf» -> 12. Нужно, когда этажи кидают отдельными файлами."""
+    found = ca.floor_from_name(Path(name))
+    if not found:
+        return None
+    n = int(found)
+    return n if 0 < n <= ca.MAX_FLOOR else None
+
+
+def extract_page(src: Path, page_no: int, dst: Path) -> None:
+    """Кладёт одну страницу альбома отдельным PDF — вектор остаётся вектором."""
+    src_doc = fitz.open(src)
+    out = fitz.open()
+    try:
+        out.insert_pdf(src_doc, from_page=page_no, to_page=page_no)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        out.save(dst, garbage=4, deflate=True)
+    finally:
+        out.close()
+        src_doc.close()
 
 
 def _polygon_mask(points, width: int, height: int) -> np.ndarray:
