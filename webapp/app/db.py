@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS projects (
     name       TEXT NOT NULL,
     floors     INTEGER NOT NULL,
     kind       TEXT NOT NULL DEFAULT 'flats',   -- flats | offices
+    shared     INTEGER NOT NULL DEFAULT 0,      -- 1 — объект виден всем
     created_at INTEGER NOT NULL
 );
 
@@ -120,6 +121,11 @@ def init() -> None:
         if "kind" not in cols:
             conn.execute("ALTER TABLE projects ADD COLUMN kind TEXT NOT NULL "
                          "DEFAULT 'flats'")
+        # Объекты, созданные до появления общего доступа, остаются личными:
+        # открыть их всем — решение владельца, а не побочный эффект обновления.
+        if "shared" not in cols:
+            conn.execute("ALTER TABLE projects ADD COLUMN shared INTEGER NOT NULL "
+                         "DEFAULT 0")
         conn.commit()
 
 

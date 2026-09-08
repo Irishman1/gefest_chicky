@@ -324,13 +324,28 @@ def register(request: Request, code: str = Form(...), username: str = Form(...),
 
 
 # ------------------------------------------------------------------ проекты
+def may_open(row, user) -> bool:
+    """Общий объект открыт всем, кто вошёл; личный — владельцу и админам."""
+    return (bool(row["shared"]) or row["user_id"] == user["id"]
+            or bool(user["is_admin"]))
+
+
 def get_project(project_id: int, user):
     row = db.one("SELECT * FROM projects WHERE id = ?", (project_id,))
     if not row:
         raise HTTPException(404, "Проект не найден")
-    if row["user_id"] != user["id"] and not user["is_admin"]:
+    if not may_open(row, user):
         raise HTTPException(403, "Это чужой проект")
     return row
+
+
+def owns_project(row, user) -> bool:
+    """Кому решать, общий объект или личный: владельцу и админам.
+
+    Сам доступ у общего объекта полный — кто угодно режет, правит и удаляет.
+    А вот снимать и ставить галочку «общий» может только хозяин: иначе первый
+    же пользователь мог бы закрыть объект от остальных."""
+    return row["user_id"] == user["id"] or bool(user["is_admin"])
 
 
 @app.get("/projects", response_class=HTMLResponse)
@@ -340,14 +355,17 @@ def projects(request: Request, user=Depends(require_user)):
         "(SELECT COUNT(*) FROM floors f WHERE f.project_id = p.id AND f.status='done') "
         "AS ready, "
         "(SELECT COUNT(*) FROM apartments a JOIN floors f ON f.id = a.floor_id "
-        " WHERE f.project_id = p.id) AS flats "
-        "FROM projects p WHERE p.user_id = ? ORDER BY p.created_at DESC", (user["id"],))
-    return page(request, "projects.html", projects=rows)
+        " WHERE f.project_id = p.id) AS flats, "
+        "(SELECT u.username FROM users u WHERE u.id = p.user_id) AS owner "
+        "FROM projects p WHERE p.user_id = ? OR p.shared = 1 "
+        "ORDER BY p.created_at DESC", (user["id"],))
+    return page(request, "projects.html", projects=rows, me=user["username"])
 
 
 @app.post("/projects")
 def create_project(request: Request, name: str = Form(...), floors: int = Form(...),
-                   kind: str = Form(...), user=Depends(require_user)):
+                   kind: str = Form(...), shared: str = Form(""),
+                   user=Depends(require_user)):
     name = name.strip()
     if not name:
         raise HTTPException(400, "Укажите название объекта")
@@ -356,14 +374,29 @@ def create_project(request: Request, name: str = Form(...), floors: int = Form(.
     if kind not in ("flats", "offices"):
         raise HTTPException(400, "Выберите тип объекта: квартиры или офисы")
     floors = max(1, min(int(floors), MAX_FLOOR))
-    pid = db.execute("INSERT INTO projects (user_id, name, floors, kind, created_at) "
-                     "VALUES (?,?,?,?,?)", (user["id"], name, floors, kind, db.now()))
+    is_shared = 1 if shared else 0
+    pid = db.execute("INSERT INTO projects (user_id, name, floors, kind, shared, "
+                     "created_at) VALUES (?,?,?,?,?,?)",
+                     (user["id"], name, floors, kind, is_shared, db.now()))
     for n in range(1, floors + 1):
         db.execute("INSERT INTO floors (project_id, number, status, updated_at) "
                    "VALUES (?,?,'empty',?)", (pid, n, db.now()))
     db.log_action(user, "project.create",
-                  f"{name} ({floors} эт., {'офисы' if kind == 'offices' else 'квартиры'})")
+                  f"{name} ({floors} эт., {'офисы' if kind == 'offices' else 'квартиры'}"
+                  f"{', общий' if is_shared else ''})")
     return RedirectResponse(f"/projects/{pid}", status_code=303)
+
+
+@app.post("/projects/{project_id}/shared")
+def toggle_shared(project_id: int, request: Request, user=Depends(require_user)):
+    row = get_project(project_id, user)
+    if not owns_project(row, user):
+        raise HTTPException(403, "Открыть или закрыть объект может только владелец")
+    now_shared = 0 if row["shared"] else 1
+    db.execute("UPDATE projects SET shared=? WHERE id=?", (now_shared, project_id))
+    db.log_action(user, "project.shared",
+                  f"{row['name']}: {'открыт всем' if now_shared else 'снова личный'}")
+    return RedirectResponse(f"/projects/{project_id}", status_code=303)
 
 
 @app.post("/projects/{project_id}/delete")
@@ -391,9 +424,11 @@ def project_page(project_id: int, request: Request, floor: int = 0, note: str = 
     flats = [{"idx": a["idx"], "label": a["label"], "number": a["number"],
               "filename": a["filename"],
               "box": [a["x0"], a["y0"], a["x1"], a["y1"]]} for a in apts]
+    owner = db.one("SELECT username FROM users WHERE id=?", (proj["user_id"],))
     return page(request, "project.html", project=proj, floors=floors,
                 floor=current, apartments=apts, flats_json=flats,
-                note=note[:400])
+                note=note[:400], owner=owner["username"] if owner else "",
+                may_share=owns_project(proj, user))
 
 
 def _ensure_floor(project_id: int, number: int):
@@ -715,12 +750,13 @@ def edit_reset(project_id: int, number: int, request: Request,
 
 # --------------------------------------------------------------------- API
 def get_floor(floor_id: int, user):
-    row = db.one("SELECT f.*, p.user_id, p.name AS project_name, p.id AS pid "
+    row = db.one("SELECT f.*, p.user_id, p.shared, p.name AS project_name, "
+                 "p.id AS pid "
                  "FROM floors f JOIN projects p ON p.id=f.project_id WHERE f.id=?",
                  (floor_id,))
     if not row:
         raise HTTPException(404, "Этаж не найден")
-    if row["user_id"] != user["id"] and not user["is_admin"]:
+    if not may_open(row, user):
         raise HTTPException(403, "Это чужой проект")
     return row
 

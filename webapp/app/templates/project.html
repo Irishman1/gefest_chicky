@@ -4,17 +4,26 @@
 
 <div class="page-head">
   <div>
-    <h1>{{ project["name"] }} <span class="kind">{{ "офисы" if project["kind"] == "offices" else "квартиры" }}</span></h1>
+    <h1>{{ project["name"] }} <span class="kind">{{ "офисы" if project["kind"] == "offices" else "квартиры" }}</span>
+      {% if project["shared"] %}<span class="kind shared">общий</span>{% endif %}</h1>
     <p class="lede">{{ project["floors"] }} этажей. Выберите этаж ниже и загрузите PDF плана —
-      или сразу альбом на несколько этажей: они разложатся сами.</p>
+      или сразу альбом на несколько этажей: они разложатся сами.
+      {% if project["shared"] and not may_share %}<br>Общий объект, создал {{ owner }} —
+        вы можете резать и править его наравне с автором.{% endif %}</p>
   </div>
   <div class="actions">
     <a class="btn" href="/download/project/{{ project['id'] }}">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0-4-4m4 4 4-4M4 21h16"/></svg>
       Скачать объект
     </a>
+    {% if may_share %}
+      <form method="post" action="/projects/{{ project['id'] }}/shared"
+            onsubmit="return confirm({% if project['shared'] %}'Закрыть объект? Он останется виден только вам и администраторам.'{% else %}'Открыть объект всем? Любой вошедший сможет резать, править и удалить его.'{% endif %})">
+        <button class="ghost" type="submit">{{ "Сделать личным" if project["shared"] else "Открыть всем" }}</button>
+      </form>
+    {% endif %}
     <form method="post" action="/projects/{{ project['id'] }}/delete"
-          onsubmit="return confirm('Удалить проект вместе со всеми этажами и файлами?')">
+          onsubmit="return confirm({% if project['shared'] %}'Это общий объект, создал {{ owner }}. Удалить его вместе со всеми этажами и файлами?'{% else %}'Удалить проект вместе со всеми этажами и файлами?'{% endif %})">
       <button class="ghost danger" type="submit">Удалить</button>
     </form>
   </div>

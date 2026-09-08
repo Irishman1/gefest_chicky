@@ -5,7 +5,8 @@
 <div class="page-head">
   <div>
     <h1>Проекты</h1>
-    <p class="lede">Объект — это дом. Внутри переключаются этажи, на каждый загружается свой PDF плана.</p>
+    <p class="lede">Объект — это дом. Внутри переключаются этажи, на каждый загружается свой PDF плана.
+      Общий объект видят все, кто вошёл, и работают с ним наравне с автором.</p>
   </div>
 </div>
 
@@ -26,6 +27,10 @@
         <label class="opt"><input type="radio" name="kind" value="offices" required>Офисы</label>
       </div>
     </div>
+    <div class="field-share">
+      <label>Доступ</label>
+      <label class="opt"><input type="checkbox" name="shared" value="1">Общий</label>
+    </div>
     <button class="primary" type="submit">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
       Создать
@@ -44,6 +49,9 @@
           <div class="tile-top">
             <h3>{{ p["name"] }}</h3>
             <span class="kind">{{ "офисы" if p["kind"] == "offices" else "квартиры" }}</span>
+            {% if p["shared"] %}
+              <span class="kind shared" title="{% if p['owner'] != me %}Создал {{ p['owner'] }}. {% endif %}Объект открыт всем">общий{% if p["owner"] != me %} · {{ p["owner"] }}{% endif %}</span>
+            {% endif %}
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
           </div>
           <div class="tile-stats">

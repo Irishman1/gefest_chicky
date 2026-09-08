@@ -315,6 +315,14 @@ button svg, .btn svg { flex: none; }
 .note svg { flex: none; margin-top: 1px; }
 .hint-inline { font-size: 12.5px; max-width: 34ch; line-height: 1.35; }
 
+/* Объект, открытый всем: отличается от метки типа, но не кричит. */
+.kind.shared {
+  color: var(--accent-2); background: var(--accent-tint);
+  border-color: var(--accent-line);
+}
+.new-project .field-share { display: flex; flex-direction: column; gap: 6px; }
+.new-project .field-share .opt { white-space: nowrap; }
+
 /* =========================================================================
    Статусы
    ========================================================================= */
@@ -379,6 +387,8 @@ button svg, .btn svg { flex: none; }
   font-size: 11.5px; font-weight: 500; color: var(--muted);
 }
 .tile-top .kind { margin-left: auto; }
+/* Вторая метка («общий») идёт сразу за первой, а не отжимается вправо. */
+.tile-top .kind + .kind { margin-left: 0; }
 h1 .kind { margin-left: 8px; }
 
 .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(258px, 1fr)); }
