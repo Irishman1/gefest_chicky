@@ -1441,16 +1441,22 @@ def smooth_mask(mask: np.ndarray, radius: int, protect: np.ndarray = None) -> np
     return ndi.binary_fill_holes(m)
 
 
-def add_door_swings(mask, ink_solid, reach_px, max_area_px):
+def add_door_swings(mask, ink_solid, reach_px, max_area_px, taken=None):
     """
     Повертає в кадр вхідні двері: область, обмежену дугою відчинення, полотном
     дверей і стіною, додаємо цілком. Межа в цьому місці йде по самій дузі —
     півколом, як на кресленні, і вже не вирівнюється по сітці.
+
+    Тим самим кроком закриваються ніші під стояки: кишеня, обмежена лініями
+    креслення, або входить у кадр цілком, або лишається зовні — навпіл її не
+    ріжемо. `taken` — те, що вже дісталось сусідам: туди не заходимо.
     """
     reach = max(int(reach_px), 1)
     zone = ndi.binary_dilation(mask, structure=square(3), iterations=reach)
     closed = ndi.binary_fill_holes(mask | (ink_solid & zone))
     cand = closed & ~mask
+    if taken is not None:
+        cand &= ~taken
     if not cand.any():
         return mask
     lab, n = ndi.label(cand, structure=np.ones((3, 3), bool))
@@ -1459,9 +1465,15 @@ def add_door_swings(mask, ink_solid, reach_px, max_area_px):
     sizes = np.bincount(lab.ravel(), minlength=n + 1)
     boxes = ndi.find_objects(lab)
     touching = np.unique(lab[ndi.binary_dilation(mask, structure=np.ones((3, 3), bool))])
+    # Кишеня має бути тілом, а не рискою: вісь, виносна лінія розміру і хвіст
+    # штриховки теж торкаються межі, але після ерозії від них нічого не лишається.
+    # Саме вони стирчали з кадру тонкими вусиками.
+    body = set(np.unique(lab[ndi.binary_erosion(cand, structure=square(3))]))
     keep = []
     for i in touching:
         if i <= 0 or not (4 <= sizes[i] <= max_area_px):
+            continue
+        if i not in body:
             continue
         sl = boxes[i - 1]
         if sl is None:
@@ -1522,6 +1534,12 @@ def expand_masks(masks, rgb, dilate_px, snap_area_px, smooth_px,
 
     out = [(lab == i) | masks[i - 1] for i in range(1, len(masks) + 1)]
 
+    # Чужа територія: усе, що вже дісталось іншим квартирам. Жоден наступний
+    # крок туди не заходить — саме звідти в кадр потрапляли чужа ванна, чужий
+    # стояк і шматок сусідньої кімнати.
+    claimed = lab > 0
+    taken = [claimed & (lab != i) for i in range(1, len(masks) + 1)]
+
     # зона стіни навколо квартири: далі неї нічого не добираємо, інакше в кадр
     # лізуть дуги дверей і виносні лінії, а межа перетворюється на «сходинки»
     envelopes = [ndi.binary_dilation(m, structure=square(3), iterations=max(steps, 1))
@@ -1533,17 +1551,18 @@ def expand_masks(masks, rgb, dilate_px, snap_area_px, smooth_px,
     if blocks.any():
         parts.append((blocks, snap_area_px))
     for layer, cap in parts:
-        out = all_or_nothing(out, layer, cap, envelopes)
+        out = all_or_nothing(out, layer, cap, envelopes, taken)
 
     door_reach = max(int(round(dilate_px * 2)), 1)
     door_area = max(snap_area_px, 1.0)
     result = []
     for i, m in enumerate(out):
         clean = smooth_mask(m, int(round(smooth_px)), protect=masks[i])
-        result.append(add_door_swings(clean, ink_solid, door_reach, door_area))
+        result.append(add_door_swings(clean, ink_solid, door_reach, door_area,
+                                      taken[i]))
 
     # Після згладжування, щоб воно не зрізало щойно добране назад.
-    result = keep_elements_whole(result, ink, snap_area_px, span_px, reach_px)
+    result = keep_elements_whole(result, ink, snap_area_px, span_px, reach_px, taken)
     return result
 
 
@@ -1552,7 +1571,7 @@ def expand_masks(masks, rgb, dilate_px, snap_area_px, smooth_px,
 TAIL_REACH = 6.0
 
 
-def keep_elements_whole(out, ink, area_px, span_px, reach_px):
+def keep_elements_whole(out, ink, area_px, span_px, reach_px, taken=None):
     """
     Останній рубіж: межа не повинна розрізати намальоване навпіл.
 
@@ -1572,6 +1591,11 @@ def keep_elements_whole(out, ink, area_px, span_px, reach_px):
     st = np.ones((3, 3), bool)
     for i, m in enumerate(out):
         tails = ink & ndi.binary_dilation(m, structure=ring) & ~m
+        if taken is not None:
+            # За стіною починається сусід. Його сантехніка й меблі теж
+            # «продовжують» лінію, розрізану межею, — але добирати їх не можна:
+            # саме так у кадр потрапляла чужа ванна.
+            tails &= ~taken[i]
         comp, n = ndi.label(tails, structure=st)
         if not n:
             continue
@@ -1585,23 +1609,58 @@ def keep_elements_whole(out, ink, area_px, span_px, reach_px):
             if box is None or sizes[k] > area_px or not joined[k]:
                 continue
             span = max(box[0].stop - box[0].start, box[1].stop - box[1].start)
-            if span <= span_px:
-                add.append(k)
+            if span > span_px:
+                continue
+            # Гола риска — це вісь або виносна лінія розміру, а не відрізана
+            # частина символа. Її добирати не треба: саме такі вусики стирчали
+            # з готового кадру.
+            if _stroke_like(box, sizes[k]):
+                continue
+            add.append(k)
         if add:
             out[i] = m | np.isin(comp, add)
     return out
 
 
-def all_or_nothing(out, layer, snap_area_px, envelopes):
+# Тонше за це — вже не елемент креслення, а риска: вісь, виносна лінія
+# розміру, хвіст штриховки. Такі в кадр цілком не добираються: вони
+# перетинають межу наскрізь і стирчать назовні вусиком.
+STROKE_PX = 3
+
+
+def _stroke_like(box, size) -> bool:
+    """Риска, а не елемент: вузька в одному напрямку або майже без товщини."""
+    bh = box[0].stop - box[0].start
+    bw = box[1].stop - box[1].start
+    span = max(bh, bw)
+    return min(bh, bw) < STROKE_PX or (span >= 4 and size <= 1.8 * span)
+
+
+def _line_like(comp, sizes, n):
+    """Прапорці «це риска» для всіх компонент одразу."""
+    flag = np.zeros(n + 1, bool)
+    for box, k in zip(ndi.find_objects(comp), range(1, n + 1)):
+        if box is not None:
+            flag[k] = _stroke_like(box, sizes[k])
+    return flag
+
+
+def all_or_nothing(out, layer, snap_area_px, envelopes, taken=None):
     """
     Кожен цілісний елемент або повністю в кадрі, або повністю поза ним.
-    Береться лише те, що вміщається в зону стіни навколо квартири.
+    Береться лише те, що вміщається в зону стіни навколо квартири і не стоїть
+    у сусіда.
     """
     comp, n = ndi.label(layer, structure=np.ones((3, 3), bool))
     if n and snap_area_px > 0:
         sizes = np.bincount(comp.ravel(), minlength=n + 1).astype(np.float64)
         small = sizes <= snap_area_px
         small[0] = False
+        # Осі й виносні лінії розмірів — теж «цілісні елементи», але правило
+        # «цілком або ніяк» до них застосовувати не можна: вони перетинають
+        # межу наскрізь, і кадр отримував тонкий вусик назовні. Впізнаємо їх за
+        # тим, що пікселів у них рівно стільки, скільки завдовжки сама лінія.
+        small &= ~_line_like(comp, sizes, n)
         for i, m in enumerate(out):
             sel = comp[m]
             if sel.size == 0:
@@ -1610,6 +1669,10 @@ def all_or_nothing(out, layer, snap_area_px, envelopes):
             share = np.zeros_like(hit)
             np.divide(hit, sizes, out=share, where=sizes > 0)
             outside = np.bincount(comp[~envelopes[i]], minlength=n + 1)
+            if taken is not None:
+                # Елемент, що стоїть у сусіда, — його, хай навіть краєчок
+                # заходить до нас.
+                outside = outside + np.bincount(comp[taken[i]], minlength=n + 1)
             fits = outside == 0                                  # не стирчить за стіну
             mine = np.nonzero(small & fits & (share >= 0.4))[0]  # беремо повністю
             theirs = np.nonzero(small & (hit > 0) & ~(fits & (share >= 0.4)))[0]
@@ -1622,9 +1685,72 @@ def all_or_nothing(out, layer, snap_area_px, envelopes):
 
 
 # ========================================================================= вивід
-def save_apartment(base_img: Image.Image, mask: np.ndarray, out_path: Path,
-                   pad_px: int, bg: str, quality: int):
+# Скільки пікселів має бути в довгій стороні вирізки. В альбомі на аркуші
+# по два десятки планів, і при спільному dpi сторінки кожна квартира виходить
+# завбільшки з марку. Тому таку квартиру перемальовуємо окремо, з клипом, —
+# у векторному PDF це чиста деталізація, а не розтягнута картинка.
+MIN_LONG_PX = 1200
+MAX_RENDER_DPI = 900.0
+
+
+def _is_vector_page(page) -> bool:
+    """Скан чи креслення? Скан від більшого dpi різкішим не стане."""
+    flag = getattr(page, "_ca_vector", None)
+    if flag is None:
+        flag = len(page.get_drawings()) > 50
+        try:
+            page._ca_vector = flag
+        except AttributeError:                     # об'єкт сторінки без слотів
+            pass
+    return flag
+
+
+def sharp_source(page, mask, mask_dpi, dpi, padding_pt, min_px=MIN_LONG_PX):
+    """
+    Перемальовує саме цю квартиру різкіше.
+
+    Повертає (картинка, маска під неї, поле в пікселях) або None, якщо
+    вирізка й так достатньо велика (тоді береться готовий рендер сторінки).
+    """
+    if page is None or min_px <= 0 or not mask.any():
+        return None
+    if not _is_vector_page(page):
+        return None
+    ys, xs = np.nonzero(mask)
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    long_px = max(x1 - x0, y1 - y0) * dpi / float(mask_dpi)
+    if long_px >= min_px:
+        return None
+    out_dpi = min(dpi * min_px / max(long_px, 1.0), MAX_RENDER_DPI)
+    if out_dpi <= dpi * 1.05:
+        return None
+
+    pad_pt = max(padding_pt, 0.0) + 1.0            # +1 pt, щоб не зрізати край
+    pt = 72.0 / mask_dpi                           # піксель маски -> пункт
+    clip = fitz.Rect(x0 * pt - pad_pt, y0 * pt - pad_pt,
+                     x1 * pt + pad_pt, y1 * pt + pad_pt) & page.rect
+    pix = page.get_pixmap(dpi=int(round(out_dpi)), clip=clip, alpha=False)
+    if not pix.width or not pix.height:
+        return None
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+    # pix.irect — точне місце клипа в повному рендері сторінки при тому ж dpi,
+    # тож маску беремо рівно з тієї ж ділянки: без зсуву на півпікселя.
+    k = float(pix.xres) / mask_dpi
     m_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+    ix0, iy0, ix1, iy1 = tuple(pix.irect)
+    box = (ix0 / k, iy0 / k, ix1 / k, iy1 / k)
+    m_img = m_img.resize((pix.width, pix.height), Image.BILINEAR, box=box)
+    pad_px = max(int(round(padding_pt * out_dpi / 72.0)), 0)
+    return img, m_img, pad_px
+
+
+def save_apartment(base_img: Image.Image, mask, out_path: Path,
+                   pad_px: int, bg: str, quality: int):
+    """mask — булев масив або вже готова L-маска під розмір base_img."""
+    m_img = mask if isinstance(mask, Image.Image) else \
+        Image.fromarray((mask * 255).astype(np.uint8), mode="L")
     if m_img.size != base_img.size:                # BILINEAR = край без сходинок
         m_img = m_img.resize(base_img.size, Image.BILINEAR)
 
@@ -1909,9 +2035,14 @@ def process_page(page, img_getter, page_no, out_dir, args, tess, name_floor):
 
     saved, used = 0, set()
     for apt, mask in zip(apts, masks):
-        path = save_apartment(base_img, mask,
+        src, m, pad = base_img, mask, pad_px
+        sharp = sharp_source(page, mask, info["mask_dpi"], args.dpi, args.padding,
+                             args.min_px)
+        if sharp:
+            src, m, pad = sharp
+        path = save_apartment(src, m,
                               out_dir / out_name(args, floor_tag, apt, ext, used),
-                              pad_px, args.bg, args.quality)
+                              pad, args.bg, args.quality)
         if path:
             saved += 1
             print(f"      {apt.label:<10} -> {path.name}")
@@ -1981,6 +2112,9 @@ def build_parser():
     ap.add_argument("--mask-dpi", type=int, default=150,
                     help="роздільна здатність, на якій рахується межа квартири")
     ap.add_argument("--padding", type=float, default=6.0, help="поле навколо квартири, пункти")
+    ap.add_argument("--min-px", type=int, default=MIN_LONG_PX,
+                    help="мінімальна довга сторона вирізки в пікселях "
+                         "(дрібні плани альбому перемальовуються різкіше; 0 — вимкнути)")
     ap.add_argument("--snap-span", type=float, default=30.0,
                     dest="snap_span",
                     help="макс. розмір (пункти) цілісного елемента, який на межі "

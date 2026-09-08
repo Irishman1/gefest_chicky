@@ -118,33 +118,56 @@
         </div>
       </div>
       <div class="edit-bar">
-        <button type="button" id="edit-toggle" class="btn-sm">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-          Править вручную
+        <button type="button" id="edit-new" class="btn-sm">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+          Обвести вручную
         </button>
-        <button type="button" id="edit-stop" class="btn-sm ghost icon-only" hidden
-                title="Выйти из режима правки (Esc)" aria-label="Выйти из режима правки">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        </button>
-        <span id="edit-hint" class="muted" hidden>
-          Обводите помещение кликами по плану — минимум три точки. Двойной клик замыкает контур.
-        </span>
-
-        <form id="edit-add" method="post" hidden
-              action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/edits/add">
-          <input type="hidden" name="polygon" id="edit-polygon">
-          <input type="hidden" name="target" id="edit-target">
-          <input type="text" name="flat" id="edit-flat" required autocomplete="off"
-                 placeholder="номер, напр. {{ apartments[0]['number'] if apartments else '1' }}">
-          <button class="primary btn-sm" type="submit">Сохранить контур</button>
-          <button type="button" class="btn-sm ghost" id="edit-cancel">Отмена</button>
-        </form>
-
+        <span class="muted">Нажмите на {{ "офис" if project["kind"] == "offices" else "квартиру" }} на плане
+          и выберите «Редактировать» — контур откроется в отдельном окне.</span>
         <span class="spacer"></span>
         <form method="post" action="/projects/{{ project['id'] }}/floors/{{ floor['number'] }}/edits/reset"
               onsubmit="return confirm('Сбросить все ручные правки этого этажа и порезать заново?')">
           <button class="btn-sm ghost danger" type="submit">Сбросить правки</button>
         </form>
+      </div>
+
+      <!-- окно правки контура: на общем плане квартира размером с марку,
+           попасть мышью в вершину там нельзя -->
+      <div id="editor" class="editor" hidden>
+        <div class="editor-box">
+          <div class="editor-head">
+            <b id="editor-title">Контур</b>
+            <span id="editor-hint" class="muted"></span>
+            <span class="spacer"></span>
+            <span class="zoom-bar">
+              <button type="button" class="btn-sm" data-ezoom="out" title="Отдалить">−</button>
+              <span id="editor-zoom" class="mono">100%</span>
+              <button type="button" class="btn-sm" data-ezoom="in" title="Приблизить">+</button>
+              <button type="button" class="btn-sm ghost" data-ezoom="fit">Весь план</button>
+            </span>
+            <button type="button" class="btn-sm ghost icon-only" data-editor-close
+                    title="Закрыть (Esc)" aria-label="Закрыть">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+          </div>
+          <div id="editor-view" class="editor-view">
+            <div class="viewer-inner">
+              <img id="editor-plan" alt="План этажа {{ floor['number'] }}">
+              <canvas id="editor-canvas"></canvas>
+            </div>
+          </div>
+          <form id="editor-form" class="editor-foot" method="post" action="">
+            <input type="hidden" name="polygon" id="editor-polygon">
+            <input type="hidden" name="target" id="editor-target">
+            <input type="text" name="flat" id="editor-flat" required autocomplete="off"
+                   placeholder="номер, напр. {{ apartments[0]['number'] if apartments else '1' }}">
+            <span id="editor-count" class="muted"></span>
+            <span class="spacer"></span>
+            <button type="button" class="btn-sm ghost danger" id="editor-drop">Убрать вершину</button>
+            <button type="button" class="btn-sm ghost" data-editor-close>Отмена</button>
+            <button class="primary btn-sm" type="submit" id="editor-save">Сохранить контур</button>
+          </form>
+        </div>
       </div>
 
       <div id="flat-list" class="flats"></div>

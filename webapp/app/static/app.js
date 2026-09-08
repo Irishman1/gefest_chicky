@@ -36,7 +36,7 @@
   var hint = document.getElementById("hint");
   var ctx = overlay ? overlay.getContext("2d") : null;
   var hit = null, hitCtx = null, hitData = null;
-  var flats = {}, cache = {}, solidCache = {}, active = 0, focusId = 0;
+  var flats = {}, cache = {}, active = 0;
 
   // цвет подсветки берём из палитры темы, чтобы план и интерфейс совпадали
   function hlColor() {
@@ -82,37 +82,9 @@
     return c;
   }
 
-  // сплошной силуэт — им «прорезаем» затемнение вокруг правимой вырезки
-  function solid(id) {
-    if (solidCache[id]) return solidCache[id];
-    var c = document.createElement("canvas");
-    c.width = hit.width; c.height = hit.height;
-    var cc = c.getContext("2d");
-    var img = cc.createImageData(hit.width, hit.height);
-    var d = img.data;
-    for (var p = 0, q = 0; p < hitData.length; p += 4, q += 4) {
-      if (hitData[p] === id) { d[q + 3] = 255; }
-    }
-    cc.putImageData(img, 0, 0);
-    solidCache[id] = c;
-    return c;
-  }
-
   function paint() {
     if (!ctx) return;
     ctx.clearRect(0, 0, overlay.width, overlay.height);
-
-    // правим конкретную вырезку: всё вокруг притушено, но остаётся видимым
-    if (focusId && hitData) {
-      ctx.save();
-      ctx.fillStyle = "rgba(10,14,20,.5)";
-      ctx.fillRect(0, 0, overlay.width, overlay.height);
-      ctx.globalCompositeOperation = "destination-out";
-      ctx.drawImage(solid(focusId), 0, 0);
-      ctx.restore();
-    }
-
-    if (editing) { drawPoints(); return; }
     if (active && hitData) ctx.drawImage(silhouette(active), 0, 0);
   }
 
@@ -134,7 +106,7 @@
 
   if (plan) {
     plan.addEventListener("mousemove", function (e) {
-      if (editing || !hitData) return;
+      if (!hitData) return;
       var r = plan.getBoundingClientRect();
       var x = (e.clientX - r.left) * hit.width / r.width;
       var y = (e.clientY - r.top) * hit.height / r.height;
@@ -150,13 +122,9 @@
       }
     });
 
-    plan.addEventListener("mouseleave", function () {
-      if (editing) return;
-      highlight(0);
-    });
+    plan.addEventListener("mouseleave", function () { highlight(0); });
 
     plan.addEventListener("click", function (e) {
-      if (editing) return;
       var flat = flats[active];
       if (!flat) { closePick(); return; }
       var r = plan.getBoundingClientRect();
@@ -213,9 +181,6 @@
   // ---------------------------------------------------------------- правка
   var projectId = root.dataset.project;
   var floorNo = root.dataset.floorNumber;
-  var editing = false, points = [];
-  var shapeMode = false;          // правим готовый контур, а не рисуем новый
-  var dragIdx = -1, hoverIdx = -1;
 
   function editUrl(what) {
     return "/projects/" + projectId + "/floors/" + floorNo + "/edits/" + what;
@@ -272,12 +237,11 @@
   }
 
   function redrawBtn(a) {
-    var b = iconBtn("Перерисовать контур",
+    var b = iconBtn("Поправить контур",
       '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>');
     b.addEventListener("click", function (ev) {
       ev.stopPropagation();
-      focusOn(a);
-      root.scrollIntoView({ block: "center" });
+      openEditor(a);
     });
     return b;
   }
@@ -317,7 +281,7 @@
     return pts.length >= 3 ? pts : null;
   }
 
-  // Рамер—Дуглас—Пойкер: из тысяч ступенек границы делаем десяток вершин,
+  // Рамер—Дуглас—Пойкер: из тысяч ступенек границы делаем горсть вершин,
   // за которые реально можно ухватиться мышью
   function simplify(pts, eps) {
     if (pts.length < 3) return pts;
@@ -338,13 +302,17 @@
     return walk(0, pts.length - 1).concat([pts[pts.length - 1]]);
   }
 
+  // Порог упрощения держим мелким: контур для правки должен повторять
+  // автоматическую границу, иначе «поправить» означало бы «огрубить».
+  var MAX_POINTS = 260;
+
   function contourOf(id) {
     var raw = traceContour(id);
     if (!raw) return null;
-    var eps = Math.max(hit.width, hit.height) / 260;
+    var eps = Math.max(hit.width, hit.height) / 700;
     var out = simplify(raw, eps);
-    for (var i = 0; i < 6 && out.length > 48; i++) {     // не больше полусотни точек
-      eps *= 1.6;
+    for (var i = 0; i < 8 && out.length > MAX_POINTS; i++) {
+      eps *= 1.5;
       out = simplify(raw, eps);
     }
     return out.map(function (p) { return [p[0] / hit.width, p[1] / hit.height]; });
@@ -378,240 +346,360 @@
   if (pickClose) pickClose.addEventListener("click", closePick);
   if (pickEdit) {
     pickEdit.addEventListener("click", function () {
-      if (picked) focusOn(picked);
+      if (picked) openEditor(picked);
     });
   }
 
-  // Приближаемся к правимой вырезке и притушаем остальное: обводить по
-  // мелкому плану неудобно, а видеть соседей всё равно нужно.
-  function focusOn(flat) {
-    closePick();
-    setEditing(true);
-    focusId = flat.idx;
+  // ------------------------------------------------- окно правки контура
+  // Правку вынесли в отдельное окно: на общем плане квартира размером с марку,
+  // и попасть мышью в вершину было нельзя. Здесь она во весь экран.
+  var ed = {
+    box: document.getElementById("editor"),
+    view: document.getElementById("editor-view"),
+    plan: document.getElementById("editor-plan"),
+    canvas: document.getElementById("editor-canvas"),
+    title: document.getElementById("editor-title"),
+    hint: document.getElementById("editor-hint"),
+    count: document.getElementById("editor-count"),
+    form: document.getElementById("editor-form"),
+    poly: document.getElementById("editor-polygon"),
+    target: document.getElementById("editor-target"),
+    flat: document.getElementById("editor-flat"),
+    drop: document.getElementById("editor-drop"),
+    zoomLevel: document.getElementById("editor-zoom"),
+    save: document.getElementById("editor-save")
+  };
+  var ectx = ed.canvas ? ed.canvas.getContext("2d") : null;
 
-    var tf = document.getElementById("edit-target");
-    var ff = document.getElementById("edit-flat");
-    if (tf) tf.value = flat.number;
-    if (ff) ff.value = flat.number;
-    if (addForm) addForm.action = editUrl("replace");
+  var points = [];                 // вершины контура в долях 0..1
+  var shapeMode = false;           // правим готовый контур, а не рисуем новый
+  var dragIdx = -1, hoverIdx = -1, selIdx = -1;
+  var ezoom = 1, efit = 0;
 
-    // Обводим уже вырезанное: тянуть точки быстрее, чем обводить заново.
-    // Если контур снять не удалось — остаётся обычная обводка с нуля.
-    var got = contourOf(flat.idx);
-    if (got && got.length >= 3) {
-      points = got;
-      shapeMode = true;
-      if (polyField) polyField.value = JSON.stringify(points);
-      if (addForm) addForm.hidden = false;
-      if (editHint) {
-        editHint.textContent = "Тяните точки, чтобы поправить контур. " +
-          "Клик по линии добавит точку, Alt+клик по точке уберёт её.";
-      }
-    }
+  var DRAW_HINT = "Кликайте по плану — обводите помещение. Минимум три точки, " +
+    "двойной клик замыкает контур.";
+  var SHAPE_HINT = "Тяните вершины мышью. Клик по линии добавит вершину, " +
+    "Alt+клик или Delete уберёт ту, что под курсором.";
 
-    var box = flat.box;
-    if (box && overlay.width && fitWidth) {
-      // рамка приходит в координатах hit-карты; переводим в доли плана
-      var fw = Math.max((box[2] - box[0]) / overlay.width, 0.002);
-      var fh = Math.max((box[3] - box[1]) / overlay.height, 0.002);
-      var planH1 = fitWidth * overlay.height / overlay.width;   // высота при 100%
-      var vw = root.clientWidth, vh = root.clientHeight;
-      // вписываем рамку в окно и оставляем поля, чтобы соседей было видно
-      applyZoom(Math.min(vw / (fw * fitWidth), vh / (fh * planH1)) * 0.75);
-      root.scrollLeft = (box[0] + box[2]) / 2 / overlay.width * plan.clientWidth - vw / 2;
-      root.scrollTop = (box[1] + box[3]) / 2 / overlay.height * plan.clientHeight - vh / 2;
-    }
-    paint();
+  function ready() {
+    return ed.box && ectx;
   }
 
-  var toggle = document.getElementById("edit-toggle");
-  var stopBtn = document.getElementById("edit-stop");
-  var editHint = document.getElementById("edit-hint");
-  var addForm = document.getElementById("edit-add");
-  var polyField = document.getElementById("edit-polygon");
-  var cancelBtn = document.getElementById("edit-cancel");
+  function syncPoly() {
+    if (ed.poly) ed.poly.value = JSON.stringify(points);
+    if (ed.count) {
+      ed.count.textContent = points.length ? "точек: " + points.length : "";
+    }
+    if (ed.save) ed.save.disabled = points.length < 3;
+    if (ed.drop) {
+      ed.drop.disabled = !points.length || (shapeMode && points.length <= 3);
+    }
+  }
 
-  function drawPoints() {
-    if (!ctx || !points.length) return;
-    // Холст растянут на план, поэтому в пикселях картинки точки росли вместе
-    // с приближением и закрывали то, по чему целишься. Считаем их в экранных
-    // пикселях: k — сколько пикселей холста приходится на один экранный.
-    var k = overlay.width / (plan.clientWidth || overlay.width);
-    ctx.save();
-    ctx.beginPath();
+  function drawEditor() {
+    if (!ectx) return;
+    var W = ed.canvas.width, H = ed.canvas.height;
+    ectx.clearRect(0, 0, W, H);
+    if (!points.length) return;
+    // Холст растянут на план, поэтому в пикселях картинки вершины росли бы
+    // вместе с приближением. Считаем их в экранных пикселях: k — сколько
+    // пикселей холста приходится на один экранный.
+    var k = W / (ed.plan.clientWidth || W);
+    ectx.save();
+    ectx.beginPath();
     points.forEach(function (p, i) {
-      var x = p[0] * overlay.width, y = p[1] * overlay.height;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      var x = p[0] * W, y = p[1] * H;
+      if (i === 0) ectx.moveTo(x, y); else ectx.lineTo(x, y);
     });
-    if (points.length > 2) ctx.closePath();
-    ctx.fillStyle = "rgba(31,111,235,.16)";
-    ctx.strokeStyle = "rgb(31,111,235)";
-    ctx.lineWidth = 1.5 * k;
-    if (points.length > 2) ctx.fill();
-    ctx.stroke();
+    if (points.length > 2) ectx.closePath();
+    ectx.fillStyle = "rgba(31,111,235,.14)";
+    ectx.strokeStyle = "rgb(31,111,235)";
+    ectx.lineWidth = 1.5 * k;
+    if (points.length > 2) ectx.fill();
+    ectx.stroke();
     points.forEach(function (p, i) {
-      var live = (i === dragIdx || i === hoverIdx);
-      ctx.beginPath();
-      ctx.arc(p[0] * overlay.width, p[1] * overlay.height,
-              (live ? 5 : 3) * k, 0, Math.PI * 2);
-      // точка под курсором крупнее — видно, за что берёшься;
+      var live = (i === dragIdx || i === hoverIdx || i === selIdx);
+      ectx.beginPath();
+      ectx.arc(p[0] * W, p[1] * H, (live ? 5.5 : 3.2) * k, 0, Math.PI * 2);
+      // вершина под курсором крупнее — видно, за что берёшься;
       // первая белая — по ней видно, где замкнётся контур
-      ctx.fillStyle = live ? "#fff" : (i === 0 && !shapeMode ? "#fff" : "rgb(31,111,235)");
-      ctx.fill();
-      ctx.lineWidth = (live ? 2 : 1.5) * k;
-      ctx.stroke();
+      ectx.fillStyle = i === selIdx ? "rgb(180,35,24)"
+        : (live || (i === 0 && !shapeMode) ? "#fff" : "rgb(31,111,235)");
+      ectx.fill();
+      ectx.lineWidth = (live ? 2 : 1.5) * k;
+      ectx.stroke();
     });
-    ctx.restore();
+    ectx.restore();
   }
 
-  function setEditing(on) {
-    editing = on;
-    points = [];
-    active = 0;
-    shapeMode = false;
-    dragIdx = hoverIdx = -1;
-    if (editHint) {
-      editHint.textContent = "Обводите помещение кликами по плану — минимум три "
-        + "точки. Двойной клик замыкает контур.";
-    }
-    if (!on) {
-      focusId = 0;
-      var tf = document.getElementById("edit-target");
-      if (tf) tf.value = "";
-      if (addForm) addForm.action = editUrl("add");
-    }
+  function applyEZoom(next, ax, ay) {
+    if (!efit) return;
+    next = Math.min(Math.max(next, 1), 12);
+    var r = ed.view.getBoundingClientRect();
+    if (ax === undefined) ax = r.width / 2;
+    if (ay === undefined) ay = r.height / 2;
+    var px = (ed.view.scrollLeft + ax) / ezoom;
+    var py = (ed.view.scrollTop + ay) / ezoom;
+    ezoom = next;
+    ed.plan.style.maxWidth = "none";
+    ed.plan.style.width = Math.round(efit * ezoom) + "px";
+    ed.view.scrollLeft = px * ezoom - ax;
+    ed.view.scrollTop = py * ezoom - ay;
+    if (ed.zoomLevel) ed.zoomLevel.textContent = Math.round(ezoom * 100) + "%";
+    drawEditor();
+  }
+
+  function fitEditor(flat) {
+    ed.plan.style.width = "";
+    ed.plan.style.maxWidth = "100%";
+    ezoom = 1;
+    efit = ed.plan.clientWidth;
+    if (ed.zoomLevel) ed.zoomLevel.textContent = "100%";
+    if (!flat || !flat.box || !ed.canvas.width) { drawEditor(); return; }
+    // подводим окно к самой квартире: соседей видно, но правим свою
+    var box = flat.box;
+    var fw = Math.max((box[2] - box[0]) / ed.canvas.width, 0.002);
+    var fh = Math.max((box[3] - box[1]) / ed.canvas.height, 0.002);
+    var planH = efit * ed.canvas.height / ed.canvas.width;
+    var r = ed.view.getBoundingClientRect();
+    applyEZoom(Math.min(r.width / (fw * efit), r.height / (fh * planH)) * 0.82);
+    ed.view.scrollLeft = (box[0] + box[2]) / 2 / ed.canvas.width * ed.plan.clientWidth - r.width / 2;
+    ed.view.scrollTop = (box[1] + box[3]) / 2 / ed.canvas.height * ed.plan.clientHeight - r.height / 2;
+    drawEditor();
+  }
+
+  function openEditor(flat) {
+    if (!ready()) return;
     closePick();
-    if (editHint) editHint.hidden = !on;
-    if (stopBtn) stopBtn.hidden = !on;
-    if (addForm) addForm.hidden = true;
-    if (toggle) {
-      toggle.classList.toggle("primary", on);
-      toggle.lastChild.nodeValue = on ? " Готово" : " Править вручную";
+    highlight(0);
+    points = [];
+    dragIdx = hoverIdx = selIdx = -1;
+    shapeMode = false;
+
+    // Карта попаданий и план сняты в одном разрешении; пока она не загрузилась,
+    // обводить с нуля всё равно можно — берём размер самой картинки плана.
+    ed.canvas.width = hit ? hit.width : (plan.naturalWidth || plan.clientWidth);
+    ed.canvas.height = hit ? hit.height : (plan.naturalHeight || plan.clientHeight);
+
+    if (flat) {
+      // Обводим уже вырезанное: тянуть вершины быстрее, чем обводить заново.
+      // Если контур снять не удалось — остаётся обычная обводка с нуля.
+      var got = hitData ? contourOf(flat.idx) : null;
+      if (got && got.length >= 3) { points = got; shapeMode = true; }
+      ed.title.textContent = "Контур " + flat.label;
+      ed.flat.value = flat.number;
+      ed.target.value = flat.number;
+      ed.form.action = editUrl("replace");
+    } else {
+      ed.title.textContent = "Новая планировка";
+      ed.flat.value = "";
+      ed.target.value = "";
+      ed.form.action = editUrl("add");
     }
-    if (plan) plan.style.cursor = on ? "copy" : "crosshair";
-    if (hint) hint.style.display = "none";
-    paint();
+    ed.hint.textContent = shapeMode ? SHAPE_HINT : DRAW_HINT;
+    syncPoly();
+
+    ed.box.hidden = false;
+    document.body.classList.add("modal-open");
+    if (!ed.plan.getAttribute("src")) {
+      ed.plan.src = plan.getAttribute("src");
+    }
+    if (ed.plan.complete) fitEditor(flat);
+    else ed.plan.addEventListener("load", function once() {
+      ed.plan.removeEventListener("load", once);
+      fitEditor(flat);
+    });
   }
 
+  function closeEditor() {
+    if (!ed.box) return;
+    ed.box.hidden = true;
+    document.body.classList.remove("modal-open");
+    points = [];
+    dragIdx = hoverIdx = selIdx = -1;
+  }
 
-  if (toggle && plan && overlay) {
-    toggle.addEventListener("click", function () { setEditing(!editing); });
+  function localPt(e) {
+    var r = ed.plan.getBoundingClientRect();
+    return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height, r];
+  }
 
-    if (cancelBtn) {
-      cancelBtn.addEventListener("click", function () { setEditing(true); });
-    }
-    if (stopBtn) {
-      stopBtn.addEventListener("click", function () { setEditing(false); });
-    }
-
-    plan.addEventListener("click", function (e) {
-      if (!editing || shapeMode) return;      // в правке формы клики обрабатывает drag
-      var r = plan.getBoundingClientRect();
-      points.push([(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]);
-      paint();
-      if (addForm) addForm.hidden = points.length < 3;
-      if (polyField) polyField.value = JSON.stringify(points);
+  // ближайшая вершина в пределах grab экранных пикселей
+  function vertexAt(fx, fy, r, grab) {
+    var best = -1, bestD = grab;
+    points.forEach(function (p, i) {
+      var d = Math.hypot((p[0] - fx) * r.width, (p[1] - fy) * r.height);
+      if (d < bestD) { bestD = d; best = i; }
     });
+    return best;
+  }
 
-    // ---- перетаскивание вершин готового контура
-    function localPt(e) {
-      var r = plan.getBoundingClientRect();
-      return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height, r];
+  // ребро, на которое пришёлся клик — туда вставим новую вершину
+  function edgeAt(fx, fy, r, grab) {
+    if (points.length < 2) return -1;
+    var best = -1, bestD = grab;
+    for (var i = 0; i < points.length; i++) {
+      // Пока обводят с нуля, клик рядом с последними рёбрами — это продолжение
+      // контура, а не желание разрезать только что поставленное ребро.
+      if (!shapeMode && i >= points.length - 2) continue;
+      var a = points[i], b = points[(i + 1) % points.length];
+      var ax = a[0] * r.width, ay = a[1] * r.height;
+      var bx = b[0] * r.width, by = b[1] * r.height;
+      var px = fx * r.width, py = fy * r.height;
+      var vx = bx - ax, vy = by - ay;
+      var len2 = vx * vx + vy * vy;
+      var t = len2 ? Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / len2)) : 0;
+      var d = Math.hypot(px - (ax + t * vx), py - (ay + t * vy));
+      if (d < bestD) { bestD = d; best = i; }
     }
+    return best;
+  }
 
-    // ближайшая вершина в пределах grab экранных пикселей
-    function vertexAt(fx, fy, r, grab) {
-      var best = -1, bestD = grab;
-      points.forEach(function (p, i) {
-        var d = Math.hypot((p[0] - fx) * r.width, (p[1] - fy) * r.height);
-        if (d < bestD) { bestD = d; best = i; }
-      });
-      return best;
-    }
+  // вершина, с которой работают кнопка и Delete: под курсором, иначе выбранная,
+  // иначе последняя поставленная
+  function current() {
+    if (hoverIdx >= 0 && hoverIdx < points.length) return hoverIdx;
+    if (selIdx >= 0 && selIdx < points.length) return selIdx;
+    return points.length - 1;
+  }
 
-    // ребро, на которое пришёлся клик — туда вставим новую вершину
-    function edgeAt(fx, fy, r, grab) {
-      var best = -1, bestD = grab;
-      for (var i = 0; i < points.length; i++) {
-        var a = points[i], b = points[(i + 1) % points.length];
-        var ax = a[0] * r.width, ay = a[1] * r.height;
-        var bx = b[0] * r.width, by = b[1] * r.height;
-        var px = fx * r.width, py = fy * r.height;
-        var vx = bx - ax, vy = by - ay;
-        var len2 = vx * vx + vy * vy;
-        var t = len2 ? Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / len2)) : 0;
-        var d = Math.hypot(px - (ax + t * vx), py - (ay + t * vy));
-        if (d < bestD) { bestD = d; best = i; }
-      }
-      return best;
-    }
+  function dropPoint(i) {
+    if (i < 0 || i >= points.length) return;
+    if (shapeMode && points.length <= 3) return;   // иначе контур перестанет быть контуром
+    points.splice(i, 1);
+    if (selIdx === i) selIdx = -1;
+    else if (selIdx > i) selIdx--;
+    if (hoverIdx >= points.length) hoverIdx = -1;
+    syncPoly();
+    drawEditor();
+  }
 
-    function syncPoly() {
-      if (polyField) polyField.value = JSON.stringify(points);
-    }
-
-    plan.addEventListener("mousedown", function (e) {
-      if (!editing || !shapeMode || e.button !== 0) return;
+  if (ed.box) {
+    ed.plan.addEventListener("mousedown", function (e) {
+      if (e.button !== 0) return;
       var lp = localPt(e), fx = lp[0], fy = lp[1], r = lp[2];
       var v = vertexAt(fx, fy, r, 12);
       if (v >= 0) {
-        if (e.altKey && points.length > 3) {      // Alt — убрать вершину
-          points.splice(v, 1);
-          syncPoly(); paint();
-          return;
-        }
+        if (e.altKey) { dropPoint(v); e.preventDefault(); return; }
+        selIdx = v;
         dragIdx = v;
+        syncPoly();
+        drawEditor();
         e.preventDefault();
         return;
       }
       var edge = edgeAt(fx, fy, r, 10);
       if (edge >= 0) {                            // клик по линии — новая вершина
         points.splice(edge + 1, 0, [fx, fy]);
-        dragIdx = edge + 1;
-        syncPoly(); paint();
+        dragIdx = selIdx = edge + 1;
+        syncPoly();
+        drawEditor();
+        e.preventDefault();
+        return;
+      }
+      if (!shapeMode) {                           // обводка с нуля
+        points.push([fx, fy]);
+        selIdx = points.length - 1;
+        syncPoly();
+        drawEditor();
         e.preventDefault();
       }
     });
 
-    plan.addEventListener("mousemove", function (e) {
-      if (!editing || !shapeMode) return;
+    ed.plan.addEventListener("mousemove", function (e) {
       var lp = localPt(e), fx = lp[0], fy = lp[1], r = lp[2];
       if (dragIdx >= 0) {
         points[dragIdx] = [Math.min(Math.max(fx, 0), 1), Math.min(Math.max(fy, 0), 1)];
-        syncPoly(); paint();
+        syncPoly();
+        drawEditor();
         return;
       }
       var v = vertexAt(fx, fy, r, 12);
-      if (v !== hoverIdx) { hoverIdx = v; paint(); }
-      plan.style.cursor = v >= 0 ? "grab"
-        : (edgeAt(fx, fy, r, 10) >= 0 ? "copy" : "default");
+      if (v !== hoverIdx) { hoverIdx = v; drawEditor(); }
+      ed.plan.style.cursor = v >= 0 ? "grab"
+        : (edgeAt(fx, fy, r, 10) >= 0 ? "copy" : (shapeMode ? "default" : "crosshair"));
     });
 
     document.addEventListener("mouseup", function () {
-      if (dragIdx >= 0) { dragIdx = -1; syncPoly(); paint(); }
+      if (dragIdx >= 0) { dragIdx = -1; syncPoly(); drawEditor(); }
     });
 
-    plan.addEventListener("dblclick", function (e) {
-      if (!editing || points.length < 3) return;
+    ed.plan.addEventListener("dblclick", function (e) {
+      if (shapeMode || points.length < 3) return;
       e.preventDefault();
-      if (addForm) {
-        addForm.hidden = false;
-        var f = document.getElementById("edit-flat");
-        if (f) f.focus();
+      if (ed.flat) ed.flat.focus();
+    });
+
+    // масштаб и сдвиг внутри окна правки
+    ed.view.addEventListener("wheel", function (e) {
+      if (!efit) return;
+      e.preventDefault();
+      var r = ed.view.getBoundingClientRect();
+      applyEZoom(ezoom * (e.deltaY < 0 ? 1.2 : 1 / 1.2),
+                 e.clientX - r.left, e.clientY - r.top);
+    }, { passive: false });
+
+    ed.box.querySelectorAll("[data-ezoom]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var what = b.dataset.ezoom;
+        if (what === "in") applyEZoom(ezoom * 1.4);
+        else if (what === "out") applyEZoom(ezoom / 1.4);
+        else fitEditor(null);
+      });
+    });
+
+    var epan = null;
+    ed.view.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+    ed.view.addEventListener("mousedown", function (e) {
+      if (e.button !== 2 && e.button !== 1) return;
+      e.preventDefault();
+      epan = { x: e.clientX, y: e.clientY, l: ed.view.scrollLeft, t: ed.view.scrollTop };
+      ed.view.classList.add("panning");
+    });
+    document.addEventListener("mousemove", function (e) {
+      if (!epan) return;
+      ed.view.scrollLeft = epan.l - (e.clientX - epan.x);
+      ed.view.scrollTop = epan.t - (e.clientY - epan.y);
+    });
+    document.addEventListener("mouseup", function () {
+      if (!epan) return;
+      epan = null;
+      ed.view.classList.remove("panning");
+    });
+
+    if (ed.drop) {
+      ed.drop.addEventListener("click", function () { dropPoint(current()); });
+    }
+
+    ed.box.querySelectorAll("[data-editor-close]").forEach(function (b) {
+      b.addEventListener("click", closeEditor);
+    });
+    ed.box.addEventListener("mousedown", function (e) {
+      if (e.target === ed.box) closeEditor();     // клик по затемнению
+    });
+
+    ed.form.addEventListener("submit", function (e) {
+      if (points.length < 3) {
+        e.preventDefault();
+        return;
       }
+      syncPoly();
     });
 
     document.addEventListener("keydown", function (e) {
-      if (!editing) return;
-      if (e.key === "Escape") setEditing(points.length ? true : false);
-      if (e.key === "Backspace" && points.length) {
+      if (ed.box.hidden) return;
+      if (e.key === "Escape") { closeEditor(); return; }
+      if (document.activeElement === ed.flat) return;
+      if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
-        points.pop();
-        paint();
-        if (addForm) addForm.hidden = points.length < 3;
-        if (polyField) polyField.value = JSON.stringify(points);
+        dropPoint(current());
       }
     });
+  }
+
+  var newBtn = document.getElementById("edit-new");
+  if (newBtn) {
+    newBtn.addEventListener("click", function () { openEditor(null); });
   }
 
   // ---------------------------------------------------------------- масштаб
@@ -679,7 +767,7 @@
               e.clientX - r.left, e.clientY - r.top);
   }, { passive: false });
 
-  // сдвиг правой кнопкой — левая занята обводкой
+  // сдвиг правой кнопкой — левая занята выбором квартиры
   var pan = null;
   root.addEventListener("contextmenu", function (e) {
     if (zoom > 1) e.preventDefault();

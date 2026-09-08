@@ -5,7 +5,10 @@
 Режет PDF этажа и складывает:
   source.pdf                — исходник
   preview.png               — план этажа для просмотра
-  hitmap.png                — карта попаданий: цвет пикселя = номер квартиры
+  hitmap.png                — карта попаданий: цвет пикселя = номер квартиры.
+                              Она в том же разрешении, что и маски нарезки:
+                              по ней в браузере обводят контур для правки, и
+                              грубее автоматического он быть не должен.
   apartments/<Объект>_<этаж>_<квартира>.png
 """
 
@@ -27,7 +30,10 @@ if str(ROOT) not in sys.path:
 
 import cut_apartments as ca  # noqa: E402
 
-PREVIEW_DPI = 110          # план для просмотра в браузере
+PREVIEW_DPI = 150          # план для просмотра и правки в браузере.
+                           # Совпадает с разрешением масок: в окне правки
+                           # план приближают, и мыльная картинка мешает
+                           # попасть в стену.
 MAX_FLOOR = ca.MAX_FLOOR   # выше этого номер этажа — уже не этаж
 INVALID = '<>:"/\\|?*'
 
@@ -96,6 +102,21 @@ def _polygon_mask(points, width: int, height: int) -> np.ndarray:
     return np.asarray(img) > 0
 
 
+def _save_cut(page, base_img, mask, mask_dpi, out_path, dpi, padding_pt, bg, quality):
+    """
+    Сохраняет вырезку, дорисовывая квартиру резче, если на листе их много.
+
+    Один путь и для автонарезки, и для ручного контура — иначе правка
+    возвращала бы картинку мельче той, что была.
+    """
+    src, m = base_img, mask
+    pad_px = max(int(round(padding_pt * dpi / 72.0)), 0)
+    sharp = ca.sharp_source(page, mask, mask_dpi, dpi, padding_pt)
+    if sharp:
+        src, m, pad_px = sharp
+    return ca.save_apartment(src, m, out_path, pad_px, bg, quality)
+
+
 def apply_edits(pdf_path: Path, out_dir: Path, project_name: str, floor_number: int,
                 records: list, edits: list, dpi: int = 300, bg: str = "white",
                 quality: int = 95, padding_pt: float = 6.0, say=None) -> list:
@@ -126,6 +147,10 @@ def apply_edits(pdf_path: Path, out_dir: Path, project_name: str, floor_number: 
     base_img = None
     try:
         page = doc[0]
+        # Маску ручного контура считаем в разрешении карты попаданий: она же
+        # и есть сетка, по которой контур обводили в браузере.
+        mask_dpi = (round(72.0 * hit.shape[1] / page.rect.width) if hit is not None
+                    else dpi)
         by_number = {r["number"]: r for r in records}
 
         for e in edits:
@@ -165,21 +190,21 @@ def apply_edits(pdf_path: Path, out_dir: Path, project_name: str, floor_number: 
                     continue
                 if base_img is None:
                     base_img = ca.page_to_image(page, dpi)
-                mask = _polygon_mask(points, base_img.width, base_img.height)
+                if hit is not None:
+                    mask = _polygon_mask(points, hit.shape[1], hit.shape[0])
+                else:
+                    mask = _polygon_mask(points, base_img.width, base_img.height)
                 ext = ca.ext_for(bg)
                 name = file_name(project_name, floor_number, number, ext)
-                pad_px = max(int(round(padding_pt * dpi / 72.0)), 0)
-                if not ca.save_apartment(base_img, mask, apt_dir / name,
-                                         pad_px, bg, quality):
+                if not _save_cut(page, base_img, mask, mask_dpi, apt_dir / name,
+                                 dpi, padding_pt, bg, quality):
                     note(f"      ручной контур {number}: пустая область, пропущено")
                     continue
                 make_thumb(apt_dir / name, thumb_dir)
                 idx = max((r["idx"] for r in records), default=0) + 1
                 if hit is not None:
-                    small = np.asarray(Image.fromarray(mask).resize(
-                        (hit.shape[1], hit.shape[0]), Image.NEAREST))
-                    hit[small] = idx
-                    ys, xs = np.nonzero(small)
+                    hit[mask] = idx
+                    ys, xs = np.nonzero(mask)
                     box = ((float(xs.min()), float(ys.min()),
                             float(xs.max()), float(ys.max()))
                            if xs.size else (0.0, 0.0, 0.0, 0.0))
@@ -254,10 +279,10 @@ def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: in
         preview = ca.page_to_image(page, PREVIEW_DPI)
         preview.save(out_dir / "preview.png", optimize=True)
 
-        pad_px = max(int(round(args.padding * dpi / 72.0)), 0)
         ext = ca.ext_for(bg)
-        k = PREVIEW_DPI / info["mask_dpi"]
-        hit = np.zeros((preview.height, preview.width), np.uint8)
+        # Карта попаданий — ровно та сетка, в которой посчитаны маски: контур
+        # для ручной правки снимается с неё без потерь.
+        hit = np.zeros(masks[0].shape, np.uint8)
 
         records, used = [], set()
         for i, (apt, mask) in enumerate(zip(apts, masks), start=1):
@@ -265,17 +290,15 @@ def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: in
             if name in used:
                 name = file_name(project_name, floor_number, f"{apt.number}_{i}", ext)
             used.add(name)
-            saved = ca.save_apartment(base_img, mask, apt_dir / name,
-                                      pad_px, bg, args.quality)
+            saved = _save_cut(page, base_img, mask, info["mask_dpi"],
+                              apt_dir / name, dpi, args.padding, bg, args.quality)
             if not saved:
                 say(f"      {apt.label}: пустая маска, пропущено")
                 continue
             make_thumb(apt_dir / name, out_dir / "thumbs")
 
-            small = np.asarray(Image.fromarray(mask).resize(
-                (preview.width, preview.height), Image.NEAREST))
-            hit[small & (hit == 0)] = i
-            ys, xs = np.nonzero(small)
+            hit[mask & (hit == 0)] = i
+            ys, xs = np.nonzero(mask)
             box = ((float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max()))
                    if xs.size else (0.0, 0.0, 0.0, 0.0))
             records.append({"idx": i, "label": apt.label, "number": apt.number,
