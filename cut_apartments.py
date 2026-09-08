@@ -1497,6 +1497,32 @@ def solid_blocks(rgb: np.ndarray) -> np.ndarray:
     return ndi.binary_opening(blocks, structure=square(3))
 
 
+def trim_slivers(mask, width_px):
+    """
+    Зрізає з заливки вузькі відростки — ніші під стояки за стіною.
+
+    Такий відросток у 20-30 см завширшки заводить межу за стіну, у сусідню
+    ванну, і в кадр потрапляє шматок чужої сантехніки. Кімнати, коридори й
+    балкони ширші за поріг і лишаються недоторканими; прямі кути квадратний
+    елемент теж зберігає.
+    """
+    w = int(round(width_px))
+    if w < 2 or not mask.any():
+        return mask
+    lab, n = ndi.label(mask, structure=np.ones((3, 3), bool))
+    if not n:
+        return mask
+    out = np.zeros_like(mask)
+    for k, box in zip(range(1, n + 1), ndi.find_objects(lab)):
+        if box is None:
+            continue
+        piece = lab[box] == k
+        kept = ndi.binary_opening(piece, structure=square(w))
+        # ціла ділянка вужча за поріг (вузький балкон, лоджія) — лишаємо як є
+        out[box] |= piece if not kept.any() else kept
+    return out if out.any() else mask
+
+
 def expand_masks(masks, rgb, dilate_px, snap_area_px, smooth_px,
                  span_px=0.0, reach_px=0.0):
     """
@@ -1540,14 +1566,20 @@ def expand_masks(masks, rgb, dilate_px, snap_area_px, smooth_px,
     claimed = lab > 0
     taken = [claimed & (lab != i) for i in range(1, len(masks) + 1)]
 
+    # Заливки сусідів: усе, що залито чужим кольором приміщення.
+    all_fill = np.zeros(shape, bool)
+    for m in masks:
+        all_fill |= m
+    alien = [all_fill & ~m for m in masks]
+
     # зона стіни навколо квартири: далі неї нічого не добираємо, інакше в кадр
     # лізуть дуги дверей і виносні лінії, а межа перетворюється на «сходинки»
     envelopes = [ndi.binary_dilation(m, structure=square(3), iterations=max(steps, 1))
                  for m in masks]
 
     # елемент — цілком свій або зовсім чужий
-    parts = [(ink, snap_area_px)]
     blocks = solid_blocks(rgb)
+    parts = [(ink, snap_area_px)]
     if blocks.any():
         parts.append((blocks, snap_area_px))
     for layer, cap in parts:
@@ -1563,7 +1595,23 @@ def expand_masks(masks, rgb, dilate_px, snap_area_px, smooth_px,
 
     # Після згладжування, щоб воно не зрізало щойно добране назад.
     result = keep_elements_whole(result, ink, snap_area_px, span_px, reach_px, taken)
-    return result
+
+    # Чужа заливка — це вже інша квартира, і в кадрі їй робити нічого. Саме
+    # звідти бралися обрізки сусідської сантехніки в нішах під стояки й
+    # косий клин у куті: заливка сусіда там підходила впритул до нашої.
+    result = [m & ~alien[i] for i, m in enumerate(result)]
+
+    # Наостанок — блоки цілком, бо попередні кроки могли лишити половинку.
+    result = keep_blocks_whole(result, blocks, alien, envelopes, snap_area_px)
+
+    # І вирівнюємо межу востаннє: усі добори лишають на ній дрібні прикуси —
+    # там, де правило «елемент цілком або ніяк» обійшло символ, що злився зі
+    # штриховкою стіни. Закриття квадратом такі виїмки затягує, кутів не чіпає,
+    # а зайти до сусіда йому знову не дає його ж заливка.
+    bite = max(int(round(smooth_px * 2)) | 1, 3)
+    return [ndi.binary_fill_holes(
+                ndi.binary_closing(m, structure=square(bite))) & ~alien[i]
+            for i, m in enumerate(result)]
 
 
 # Наскільки далеко за межу заглядаємо в пошуках відрізаного хвоста, пункти.
@@ -1626,6 +1674,46 @@ def keep_elements_whole(out, ink, area_px, span_px, reach_px, taken=None):
 # розміру, хвіст штриховки. Такі в кадр цілком не добираються: вони
 # перетинають межу наскрізь і стирчать назовні вусиком.
 STROKE_PX = 3
+
+
+def keep_blocks_whole(out, blocks, alien, envelopes, snap_area_px, share_min=0.5):
+    """
+    Суцільний блок — вентшахта, колона, короб — не ріжеться навпіл.
+
+    Він стоїть у самій стіні, тож ділиться між сусідами, і згладжування межі
+    залишало від нього половинку. Тепер вирішує більша половина: чий бік
+    переважає, тому блок і дістається цілком, а не чий — у того його немає
+    зовсім.
+    """
+    if not blocks.any() or snap_area_px <= 0:
+        return out
+    comp, n = ndi.label(blocks, structure=np.ones((3, 3), bool))
+    if not n:
+        return out
+    sizes = np.bincount(comp.ravel(), minlength=n + 1).astype(np.float64)
+    small = sizes <= snap_area_px
+    small[0] = False
+    for i, m in enumerate(out):
+        hit = np.bincount(comp[m], minlength=n + 1).astype(np.float64)
+        # Блок має стояти в стіні саме цієї квартири. Без цього довгий сірий
+        # брус попід вікнами, якого межа зачепила краєчок, затягувався в кадр
+        # цілком - разом із половиною сусіднього фасаду.
+        near = np.bincount(comp[~envelopes[i]], minlength=n + 1) == 0
+        # блок, що стоїть переважно в чужій заливці, — сусідів
+        foreign = np.bincount(comp[alien[i]], minlength=n + 1).astype(np.float64)
+        share = np.zeros_like(hit)
+        np.divide(hit, sizes, out=share, where=sizes > 0)
+        theirs_share = np.zeros_like(foreign)
+        np.divide(foreign, sizes, out=theirs_share, where=sizes > 0)
+        ours = small & near & (share >= share_min) & (share > theirs_share)
+        mine = np.nonzero(ours)[0]
+        theirs = np.nonzero(small & (hit > 0) & ~ours)[0]
+        if theirs.size:
+            m = m & ~np.isin(comp, theirs)
+        if mine.size:
+            m = m | np.isin(comp, mine)
+        out[i] = m
+    return out
 
 
 def _stroke_like(box, size) -> bool:
@@ -2007,6 +2095,9 @@ def cut_page(page, img_getter, args, tess, page_no=1, name_floor=None, log=print
                     max(int(round(masks[0].shape[0] * k)), 1))
             masks = [np.asarray(Image.fromarray(m).resize(size, Image.NEAREST))
                      for m in masks]
+    if args.sliver > 0:
+        sliver_px = args.sliver * mask_dpi / 72.0
+        masks = [trim_slivers(m, sliver_px) for m in masks]
     mask_rgb = np.asarray(img_getter(mask_dpi).convert("RGB"))
     if mask_rgb.shape[:2] != masks[0].shape:
         masks = [np.asarray(Image.fromarray(m).resize(
@@ -2112,6 +2203,9 @@ def build_parser():
     ap.add_argument("--mask-dpi", type=int, default=150,
                     help="роздільна здатність, на якій рахується межа квартири")
     ap.add_argument("--padding", type=float, default=6.0, help="поле навколо квартири, пункти")
+    ap.add_argument("--sliver", type=float, default=8.0,
+                    help="вужчі за це відростки заливки (ніші під стояки) в кадр "
+                         "не тягнуться, пункти (0 — вимкнути)")
     ap.add_argument("--min-px", type=int, default=MIN_LONG_PX,
                     help="мінімальна довга сторона вирізки в пікселях "
                          "(дрібні плани альбому перемальовуються різкіше; 0 — вимкнути)")
