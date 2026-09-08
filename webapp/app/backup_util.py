@@ -3,32 +3,40 @@
 
 from __future__ import annotations
 
-import io
 import shutil
 import zipfile
+from pathlib import Path
 
 from .db import DATA_DIR, connect
 
+# Рабочие каталоги: обрывки загрузок и уже отданные архивы. В бэкапе им не место.
+SKIP_DIRS = {"backups", "incoming", "tmp"}
 
-def make_backup_bytes() -> bytes:
+
+def make_backup_file(dst: Path) -> Path:
+    """
+    Пишет бэкап во временный файл, а не в память: архив вмещает все нарезки
+    всех проектов, и на маленьком контейнере он же встречается с нарезкой,
+    которая сама берёт сотни мегабайт.
+    """
     # WAL: сбрасываем журнал в основной файл базы перед архивацией.
     with connect() as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
         for path in DATA_DIR.rglob("*"):
-            if path.is_file() and "backups" not in path.parts:
+            if path.is_file() and not (SKIP_DIRS & set(path.parts)):
                 z.write(path, path.relative_to(DATA_DIR))
-    return buf.getvalue()
+    return dst
 
 
-def restore_backup_bytes(data: bytes) -> None:
+def restore_backup_file(src: Path) -> None:
     """
     Заменяет базу и файлы проектов содержимым архива (лог-файл не трогаем —
     он открыт работающим сервисом). После восстановления сервис стоит перезапустить.
     """
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
+    with zipfile.ZipFile(src) as z:
         names = z.namelist()
         if not any(n.endswith("app.db") for n in names):
             raise ValueError("В архиве нет файла базы данных (app.db) — это не бэкап")

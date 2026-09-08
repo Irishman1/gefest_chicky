@@ -3,22 +3,26 @@
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import re
 import logging.handlers
 import os
 import secrets
+import tempfile
+import threading
+import time
 import zipfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.background import BackgroundTask
 
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from . import db, jobs, security
 
@@ -36,8 +40,38 @@ MAX_PDF_MB = int(os.environ.get("MAX_PDF_MB", "40"))
 # очередь нарезки на полдня.
 MAX_UPLOAD_FILES = int(os.environ.get("MAX_UPLOAD_FILES", "30"))
 MAX_UPLOAD_PAGES = int(os.environ.get("MAX_UPLOAD_PAGES", "60"))
+AUDIT_KEEP_DAYS = int(os.environ.get("AUDIT_KEEP_DAYS", "180"))
 
 templates = Jinja2Templates(directory=str(BASE / "templates"))
+
+
+LOGIN_WINDOW = 300          # окно счёта неудачных входов, секунд
+LOGIN_TRIES = 10            # столько неудач в окне — и адрес ждёт
+_login_fails: dict[str, list[float]] = {}
+_login_lock = threading.Lock()
+
+
+def login_blocked(key: str) -> bool:
+    """Скрипту с перебором нужно отвечать быстро и одинаково: scrypt дорогой,
+    и перебор бьёт не только по паролю, но и по процессу, который режет этаж."""
+    now = time.monotonic()
+    with _login_lock:
+        tries = [t for t in _login_fails.get(key, []) if now - t < LOGIN_WINDOW]
+        _login_fails[key] = tries
+        return len(tries) >= LOGIN_TRIES
+
+
+def login_failed(key: str) -> None:
+    now = time.monotonic()
+    with _login_lock:
+        if len(_login_fails) > 10000:                  # чтобы словарь не рос вечно
+            _login_fails.clear()
+        _login_fails.setdefault(key, []).append(now)
+
+
+def login_ok(key: str) -> None:
+    with _login_lock:
+        _login_fails.pop(key, None)
 
 
 def _fmt_time(ts):
@@ -58,10 +92,70 @@ except ValueError:                                       # пустая папк
     STATIC_V = "0"
 templates.env.globals["static_v"] = STATIC_V
 
-app = FastAPI(title="Нарезка планировок")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    setup_logging()
+    db.init()
+    security.admin_bootstrap()
+    housekeeping()
+    jobs.requeue_pending()
+    log.info("Приложение запущено, данные в %s", db.DATA_DIR)
+    yield
+
+
+def housekeeping() -> None:
+    """Просроченные сессии, старый аудит и обрывки загрузок копятся вечно."""
+    gone = db.execute_count("DELETE FROM sessions WHERE expires_at < ?", (db.now(),))
+    old = db.execute_count("DELETE FROM audit WHERE ts < ?",
+                           (db.now() - AUDIT_KEEP_DAYS * 86400,))
+    stale = 0
+    for tmp in db.DATA_DIR.glob("projects/*/incoming/*.pdf"):
+        # Файл из incoming живёт секунды: его удаляет сама загрузка. Всё, что
+        # осталось лежать, — след упавшего запроса.
+        try:
+            if db.now() - int(tmp.stat().st_mtime) > 3600:
+                tmp.unlink()
+                stale += 1
+        except OSError:
+            pass
+    if gone or old or stale:
+        log.info("Уборка: сессий %s, записей аудита %s, обрывков загрузки %s",
+                 gone, old, stale)
+
+
+app = FastAPI(title="Нарезка планировок", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 
 log = logging.getLogger("app")
+
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+@app.middleware("http")
+async def same_origin_only(request: Request, call_next):
+    """
+    Любое изменение данных должно приходить с нашей же страницы.
+
+    Токен в каждой форме тут не нужен: заголовок Origin браузер ставит сам и
+    подделать его со стороннего сайта нельзя. Где Origin не приходит (форма,
+    отправленная тем же сайтом, в части браузеров), сверяем Referer —
+    Referrer-Policy ниже гарантирует, что он будет.
+    """
+    if request.method not in SAFE_METHODS:
+        origin = request.headers.get("origin") or request.headers.get("referer")
+        if not origin or urlsplit(origin).netloc != request.url.netloc:
+            log.warning("Отклонён %s %s: origin=%r", request.method,
+                        request.url.path, origin)
+            return templates.TemplateResponse(
+                request, "error.html",
+                {"user": None, "code": 403,
+                 "detail": "Запрос пришёл не с этой страницы. "
+                           "Откройте сайт заново и повторите."},
+                status_code=403)
+    response = await call_next(request)
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    return response
 
 
 def setup_logging() -> None:
@@ -77,13 +171,6 @@ def setup_logging() -> None:
     root.handlers = [handler, console]
 
 
-@app.on_event("startup")
-def startup() -> None:
-    setup_logging()
-    db.init()
-    security.admin_bootstrap()
-    jobs.requeue_pending()
-    log.info("Приложение запущено, данные в %s", db.DATA_DIR)
 
 
 # --------------------------------------------------------------------- вход
@@ -105,9 +192,9 @@ def require_admin(request: Request):
     return user
 
 
-def page(request: Request, name: str, **ctx):
+def page(request: Request, name: str, status_code: int = 200, **ctx):
     ctx.setdefault("user", current_user(request))
-    return templates.TemplateResponse(request, name, ctx)
+    return templates.TemplateResponse(request, name, ctx, status_code=status_code)
 
 
 @app.exception_handler(Exception)
@@ -153,15 +240,25 @@ def login_form(request: Request):
 @app.post("/login", response_class=HTMLResponse)
 def login(request: Request, username: str = Form(...), password: str = Form(...)):
     username = username.strip().lower()
+    ip = request.client.host if request.client else ""
+    if login_blocked(ip) or login_blocked(username):
+        db.log_action(None, "login.blocked", username, ip)
+        return page(request, "login.html",
+                    error="Слишком много попыток. Подождите пять минут.",
+                    username=username, status_code=429)
     row = db.one("SELECT * FROM users WHERE username = ?", (username,))
     if not row or not security.check_password(password, row["password_hash"]):
-        db.log_action(None, "login.fail", username, request.client.host if request.client else "")
+        login_failed(ip)
+        login_failed(username)
+        db.log_action(None, "login.fail", username, ip)
         return page(request, "login.html", error="Неверный логин или пароль", username=username)
     if not row["is_active"]:
         return page(request, "login.html", error="Учётная запись отключена", username=username)
 
+    login_ok(ip)
+    login_ok(username)
     token = security.create_session(row["id"])
-    db.log_action(row, "login", "", request.client.host if request.client else "")
+    db.log_action(row, "login", "", ip)
     resp = RedirectResponse("/projects", status_code=303)
     resp.set_cookie(security.SESSION_COOKIE, token, httponly=True, samesite="lax",
                     max_age=security.SESSION_DAYS * 86400,
@@ -457,6 +554,11 @@ def _floor_for_edit(project_id: int, number: int, user):
     d = floor_dir(project_id, floor["id"])
     if not (d / "source.pdf").exists():
         raise HTTPException(400, "Сначала загрузите PDF")
+    # Правка меняет те же файлы и тот же hitmap, которые прямо сейчас
+    # перезаписывает фоновая нарезка. Без этого запрета правка молча пропадала
+    # или портила карту попаданий.
+    if floor["status"] in ("queued", "working"):
+        raise HTTPException(400, "Этаж сейчас режется — дождитесь окончания")
     return proj, floor, d
 
 
@@ -477,12 +579,42 @@ def _save_records(floor_id: int, records: list) -> None:
                     rec["filename"], x0, y0, x1, y1))
 
 
-def _apply_one(proj, floor, d, edit: dict, user, what: str):
-    """Пишет правку в журнал правок и сразу накладывает её на файлы этажа."""
+def _record_edit(floor_id: int, edit: dict) -> None:
+    """
+    Кладёт правку в журнал, сворачивая то, что она перекрыла.
+
+    Журнал переигрывается целиком при каждой автонарезке, поэтому десять раз
+    перерисованный контур не должен превращаться в двадцать шагов замены.
+    Свёртка меняет только длину журнала, но не итог его проигрывания.
+    """
+    action, target, number = edit["action"], edit["target"], edit["number"]
+    if action == "add":
+        # Новый контур для того же номера заменяет прежний ручной.
+        db.execute("DELETE FROM floor_edits WHERE floor_id=? AND action='add' "
+                   "AND number=?", (floor_id, number))
+    elif action == "delete":
+        dropped = db.execute_count(
+            "DELETE FROM floor_edits WHERE floor_id=? AND action='add' AND number=?",
+            (floor_id, target))
+        if dropped:
+            # Удаляем то, что сами же и дорисовали, — в журнале не остаётся
+            # ни добавления, ни удаления.
+            return
+    elif action == "rename":
+        # A->B, потом B->C: в журнале должно остаться A->C.
+        for act in ("add", "rename"):
+            if db.execute_count(
+                    "UPDATE floor_edits SET number=? WHERE floor_id=? AND action=? "
+                    "AND number=?", (number, floor_id, act, target)):
+                return
     db.execute("INSERT INTO floor_edits (floor_id, action, target, number, polygon, "
                "created_at) VALUES (?,?,?,?,?,?)",
-               (floor["id"], edit["action"], edit["target"], edit["number"],
-                edit["polygon"], db.now()))
+               (floor_id, action, target, number, edit["polygon"], db.now()))
+
+
+def _apply_one(proj, floor, d, edit: dict, user, what: str):
+    """Пишет правку в журнал правок и сразу накладывает её на файлы этажа."""
+    _record_edit(floor["id"], edit)
     records = _records_of(floor["id"])
     records = apply_edits(d / "source.pdf", d, proj["name"], floor["number"],
                           records, [edit])
@@ -667,14 +799,33 @@ def content_disposition(filename: str) -> str:
     return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
 
 
-def zip_stream(files: list[tuple[Path, str]]):
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for path, name in files:
-            if path.exists():
-                z.write(path, name)
-    buf.seek(0)
-    return buf
+def zip_to_file(files: list[tuple[Path, str]]) -> Path:
+    """
+    Складывает архив во временный файл и отдаёт путь.
+
+    В памяти его собирать нельзя: этаж — это два десятка PNG по 300 dpi, а
+    объект — все его этажи разом, и на маленьком контейнере такой архив
+    встречается с нарезкой, которая сама берёт под себя сотни мегабайт.
+    PNG и JPG уже сжаты, поэтому кладём без сжатия: ZIP_STORED быстрее и не
+    отбирает процессор у очереди нарезки.
+    """
+    tmp_dir = ensure(db.DATA_DIR / "tmp")
+    fd, name = tempfile.mkstemp(suffix=".zip", dir=str(tmp_dir))
+    os.close(fd)
+    path = Path(name)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as z:
+        for src, arc in files:
+            if src.exists():
+                z.write(src, arc)
+    return path
+
+
+def zip_response(files: list[tuple[Path, str]], name: str) -> FileResponse:
+    path = zip_to_file(files)
+    return FileResponse(
+        path, media_type="application/zip",
+        headers={"Content-Disposition": content_disposition(name)},
+        background=BackgroundTask(path.unlink, missing_ok=True))
 
 
 @app.get("/download/floor/{floor_id}")
@@ -685,11 +836,9 @@ def download_floor(floor_id: int, request: Request, user=Depends(require_user)):
     if not rows:
         raise HTTPException(404, "Нечего скачивать")
     d = apartments_dir(floor["pid"], floor_id)
-    buf = zip_stream([(d / r["filename"], r["filename"]) for r in rows])
     name = f"{floor['project_name']}_{floor['number']}.zip"
     db.log_action(user, "download.floor", name)
-    return StreamingResponse(buf, media_type="application/zip",
-                             headers={"Content-Disposition": content_disposition(name)})
+    return zip_response([(d / r["filename"], r["filename"]) for r in rows], name)
 
 
 @app.get("/download/project/{project_id}")
@@ -703,11 +852,9 @@ def download_project(project_id: int, request: Request, user=Depends(require_use
         raise HTTPException(404, "В проекте ещё нет нарезанных квартир")
     files = [(apartments_dir(project_id, r["fid"]) / r["filename"],
               f"{r['number']}/{r['filename']}") for r in rows]
-    buf = zip_stream(files)
     name = f"{proj['name']}.zip"
     db.log_action(user, "download.project", name)
-    return StreamingResponse(buf, media_type="application/zip",
-                             headers={"Content-Disposition": content_disposition(name)})
+    return zip_response(files, name)
 
 
 # ------------------------------------------------------------------ админка
@@ -744,23 +891,37 @@ def toggle_user(user_id: int, request: Request, user=Depends(require_admin)):
 def admin_backup(request: Request, user=Depends(require_admin)):
     import datetime
 
-    from .backup_util import make_backup_bytes
+    from .backup_util import make_backup_file
 
-    data = make_backup_bytes()
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
     name = f"backup-{stamp}.zip"
+    tmp_dir = ensure(db.DATA_DIR / "tmp")
+    fd, tmp = tempfile.mkstemp(suffix=".zip", dir=str(tmp_dir))
+    os.close(fd)
+    path = make_backup_file(Path(tmp))
     db.log_action(user, "backup.download", name)
-    return StreamingResponse(io.BytesIO(data), media_type="application/zip",
-                             headers={"Content-Disposition": content_disposition(name)})
+    return FileResponse(path, media_type="application/zip",
+                        headers={"Content-Disposition": content_disposition(name)},
+                        background=BackgroundTask(path.unlink, missing_ok=True))
 
 
 @app.post("/admin/restore")
 async def admin_restore(request: Request, archive: UploadFile = File(...),
                         user=Depends(require_admin)):
-    from .backup_util import restore_backup_bytes
+    from .backup_util import restore_backup_file
 
-    data = await archive.read()
-    restore_backup_bytes(data)
+    # Архив целиком в памяти держать незачем — пишем на диск кусками.
+    tmp_dir = ensure(db.DATA_DIR / "tmp")
+    fd, tmp = tempfile.mkstemp(suffix=".zip", dir=str(tmp_dir))
+    os.close(fd)
+    path = Path(tmp)
+    try:
+        with path.open("wb") as fh:
+            while chunk := await archive.read(1 << 20):
+                fh.write(chunk)
+        restore_backup_file(path)
+    finally:
+        path.unlink(missing_ok=True)
     db.log_action(user, "backup.restore", archive.filename or "")
     return RedirectResponse("/admin", status_code=303)
 

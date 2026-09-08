@@ -140,6 +140,14 @@ def execute(sql: str, args: tuple = ()) -> int:
         return cur.lastrowid
 
 
+def execute_count(sql: str, args: tuple = ()) -> int:
+    """Как execute, но возвращает число затронутых строк — для уборки."""
+    with connect() as conn:
+        cur = conn.execute(sql, args)
+        conn.commit()
+        return cur.rowcount
+
+
 def log_action(user, action: str, details: str = "", ip: str = "") -> None:
     execute(
         "INSERT INTO audit (ts, user_id, username, action, details, ip) VALUES (?,?,?,?,?,?)",

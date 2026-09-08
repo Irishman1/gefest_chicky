@@ -17,20 +17,12 @@ from __future__ import annotations
 import argparse
 import datetime
 import sys
-import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from app.db import DATA_DIR  # noqa: E402
-
-
-def make_backup(out_path: Path) -> Path:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for path in DATA_DIR.rglob("*"):
-            if path.is_file():
-                z.write(path, path.relative_to(DATA_DIR))
-    return out_path
+# Один и тот же архиватор, что и в админке: там уже и сброс WAL в базу,
+# и пропуск рабочих каталогов.
+from app.backup_util import make_backup_file  # noqa: E402
 
 
 def main() -> None:
@@ -44,7 +36,7 @@ def main() -> None:
         stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
         out = Path(__file__).resolve().parent / "backups" / f"backup-{stamp}.zip"
 
-    path = make_backup(out)
+    path = make_backup_file(out)
     size_mb = path.stat().st_size / 1024 / 1024
     print(f"Готово: {path} ({size_mb:.1f} МБ)")
 
