@@ -23,6 +23,7 @@ import argparse
 import csv
 import io
 import math
+import heapq
 import os
 import re
 import shutil
@@ -50,6 +51,20 @@ MAX_FLOOR = 200
 # Заливки в PDF точні, тож поріг маленький — він відрізняє «та сама заливка»
 # від «сусідній відтінок палітри».
 SAME_TINT = 10.0
+
+# Рівень, нижче якого піксель вважається лінією креслення, а не заливкою.
+INK_LEVEL = 200
+
+# Скільки чистих пікселів заливки досить, щоб довіряти кольору кімнати.
+MIN_CLEAN_PX = 16
+
+# У скільки разів перетин стіни дорожчий за проїзд такої ж відстані всередині
+# квартири. Стіна має вирішувати належність, відстань — лише розсудити нічию.
+WALL_WEIGHT = 50.0
+
+# У скільки разів за товщину перегородки дозволено зазирнути за серединну
+# лінію, щоб у кадр потрапила зовнішня грань спільної стіни.
+WALL_SPAN = 3
 
 # Підпис квартири: "А-12.1", "К-3.15", "A-12,1". Перший символ може не
 # розпізнатись зі шрифту PDF (�) або бути прочитаний OCR як латиниця — не біда.
@@ -1023,6 +1038,110 @@ def colored_fill_mask(rgb: np.ndarray, sat_thr: float, dark_thr: float):
     return colored & ~dark
 
 
+def adaptive_saturation(rgb, ceiling):
+    """Keep supported pastel fills; ignore isolated coloured annotations/noise.
+
+    Sample the page, not a particular building's palette. A colour must occupy
+    a measurable area. Near-neutral paper/grey hatching is not a fill signal.
+    The explicit threshold remains an upper bound, so low user values work.
+    """
+    sample = rgb[::4, ::4, :3].reshape(-1, 3)
+    colours, counts = np.unique(sample, axis=0, return_counts=True)
+    mx = colours.max(1).astype(float)
+    chroma = mx - colours.min(1)
+    sat = chroma / np.maximum(mx, 1)
+    supported = ((counts >= max(16, len(sample) * 0.001)) &
+                 (mx > 180) & (chroma >= 4) & (sat >= 0.015))
+    return min(float(ceiling), float(sat[supported].min()) * 0.5) if supported.any() else ceiling
+
+
+def room_fill_colours(rooms, n, rgb, ink=None):
+    """Колір заливки кожної кімнати — тільки по пікселях, вільних від ліній.
+
+    Середнє по всій компоненті залежить не від кольору підлоги, а від того,
+    скільки в кімнаті меблів і написів: маленький санвузол із ванною, унітазом
+    і мийкою «темніє» і перестає збігатися за кольором зі своєю ж квартирою.
+    Тоді прохід через двері відкидається як «інший колір», а сусідська кімната
+    через стіну лишається — і санвузол дістається чужій квартирі.
+
+    Заливка на кресленні рівна, тож середнє по чистих пікселях = її колір.
+    """
+    if ink is None:
+        ink = rgb.min(2) < INK_LEVEL
+    clean = np.where(ndi.binary_dilation(ink, structure=disk(2)), 0, rooms)
+    ids = np.arange(1, n + 1)
+    pure_n = np.bincount(clean.ravel(), minlength=n + 1)[1:]
+    whole_n = np.maximum(np.bincount(rooms.ravel(), minlength=n + 1)[1:], 1)
+    enough = pure_n >= MIN_CLEAN_PX
+    colours = np.zeros((n + 1, 3))
+    for channel in range(3):
+        band = rgb[:, :, channel]
+        pure = ndi.sum(band, clean, ids) / np.maximum(pure_n, 1)
+        whole = ndi.sum(band, rooms, ids) / whole_n
+        colours[1:, channel] = np.where(enough, pure, whole)
+    return colours
+
+
+def seeded_room_groups(rooms, n, edges, seeds, rgb, unit=1.0):
+    """Розподіляє кімнати між підписами як змагання шляхів від кожної квартири.
+
+    Дві сусідні лоджії не мають зливатись в один нероздільний об'єкт до того,
+    як до них дійдуть їхні квартири.
+
+    Ціна переходу — це насамперед стіна, яку довелось перетнути, і лише потім
+    відстань. Товщину стіни міряємо в одиницях внутрішньої перегородки (unit),
+    тож правило не залежить від DPI й масштабу креслення. Якщо ж, навпаки,
+    множити штраф за стіну на відстань між центрами (як було), то перехід між
+    двома шафами, що стоять спина до спини по різні боки міжквартирної стіни,
+    коштує менше, ніж прохід власними дверима через велику кімнату, — і
+    сусідська спальня дістається чужій квартирі.
+
+    Штраф додається на кожному кроці, тож ланцюжок дрібних уламків усередині
+    стіни не стає безкоштовним тунелем.
+    """
+    ids = np.arange(1, n + 1)
+    sizes = np.bincount(rooms.ravel(), minlength=n + 1)
+    centres = np.asarray(ndi.center_of_mass(rooms > 0, rooms, ids))
+    colours = room_fill_colours(rooms, n, rgb)
+    graph = [[] for _ in range(n + 1)]
+    for gap, a, b in edges:
+        if np.linalg.norm(colours[a] - colours[b]) > SAME_TINT:
+            continue
+        travel = float(np.linalg.norm(centres[a - 1] - centres[b - 1])) / unit
+        cost = travel + WALL_WEIGHT * (gap / unit) ** 2
+        graph[a].append((b, cost))
+        graph[b].append((a, cost))
+    distance = np.full(n + 1, np.inf)
+    owner = np.zeros(n + 1, np.int32)
+    queue = []
+    # Stable semantic order, independent of OCR/text traversal order.
+    ordered = sorted(seeds, key=lambda r: (seeds[r].label, tuple(centres[r - 1])))
+    for r in ordered:
+        distance[r], owner[r] = 0, r
+        heapq.heappush(queue, (0.0, seeds[r].label, r, r))
+    while queue:
+        dist, label, root, r = heapq.heappop(queue)
+        if dist != distance[r] or owner[r] != root:
+            continue
+        for neighbour, cost in graph[r]:
+            if neighbour in seeds and neighbour != root:
+                continue
+            # Pairwise colour similarity alone allows a chain of antialiased
+            # strokes to drift from yellow to green through intermediate tones.
+            if np.linalg.norm(colours[neighbour] - colours[root]) > SAME_TINT:
+                continue
+            candidate = dist + cost
+            if candidate < distance[neighbour]:
+                distance[neighbour], owner[neighbour] = candidate, root
+                heapq.heappush(queue, (candidate, label, root, neighbour))
+    groups, root_of = {}, {}
+    for r in ids:
+        root = int(owner[r]) or int(r)
+        root_of[int(r)] = root
+        groups.setdefault(root, []).append(int(r))
+    return groups, dict(seeds), root_of
+
+
 def _bodies_footprint(bodies, margin_frac=0.04):
     """Габарит підписаних квартир - грубий контур будівлі на аркуші."""
     y0 = x0 = None
@@ -1090,8 +1209,12 @@ def room_edges(rooms: np.ndarray, n: int, max_gap: float):
     key = np.concatenate(keys)
     gap = np.concatenate(gaps)
     uk, inv = np.unique(key, return_inverse=True)
-    best = np.full(uk.size, np.inf)
-    np.minimum.at(best, inv, gap)
+    # A one-pixel corner contact is not an opening through a wall. Measure a
+    # supported gap along the facing boundary rather than its single minimum.
+    order = np.lexsort((gap, inv))
+    counts = np.bincount(inv, minlength=uk.size)
+    starts = np.r_[0, np.cumsum(counts[:-1])]
+    best = gap[order[starts + np.minimum((counts * 0.2).astype(int), counts - 1)]]
 
     out = []
     for k, g in zip(uk, best):
@@ -1136,9 +1259,33 @@ def group_rooms(rooms, n, edges, seed_of_room):
     return groups, seed, root_of
 
 
+def unmatched_labels(labels, bodies):
+    """Підписи, під якими квартиру не вирізано.
+
+    Не всякий рядок «літера-число.число» на аркуші є квартирою: у відомості
+    так само виглядає колонка площ («26.78», «905.14»), і кожне таке число
+    інакше потрапляє в «не знайдено». Тоді звіт повідомляє про 21 втрачену
+    квартиру там, де не втрачено жодної.
+
+    Тому лишаємо тільки підписи того ж поверху, що й вирізані квартири:
+    площа з таблиці дає геть інший «поверх» і сама себе викриває. Якщо не
+    вирізано нічого, поверх нема з чим звіряти — повертаємо все.
+    """
+    found = {a.label for a in bodies}
+    floors = {}
+    for a in bodies:
+        if a.floor is not None:
+            floors[a.floor] = floors.get(a.floor, 0) + 1
+    rest = [a for a in labels if a.label not in found]
+    if floors:
+        main = max(floors, key=floors.get)
+        rest = [a for a in rest if a.floor == main]
+    return sorted({a.label for a in rest})
+
+
 def raster_apartments(rgb: np.ndarray, labels: list, args, px_per_pt: float, namer=None):
     """Виділяє маску кожної квартири на растрі. Маски — в координатах rgb."""
-    fill = colored_fill_mask(rgb, args.sat, args.dark)
+    fill = colored_fill_mask(rgb, adaptive_saturation(rgb, args.sat), args.dark)
     coverage = float(fill.mean())
     if coverage < 0.01:
         return [], [a.label for a in labels], 0, coverage
@@ -1189,7 +1336,8 @@ def raster_apartments(rgb: np.ndarray, labels: list, args, px_per_pt: float, nam
     attach_px = max(args.attach_gap * px_per_pt, merge_gap)
     far_edges = room_edges(rooms, n, attach_px)
     near_edges = [e for e in far_edges if e[0] <= merge_gap]
-    groups, seed, root_of = group_rooms(rooms, n, near_edges, seed_of_room)
+    groups, seed, root_of = seeded_room_groups(rooms, n, far_edges, seed_of_room, rgb,
+                                               unit=merge_gap)
 
     bodies = []
     for root, members in groups.items():
@@ -1268,10 +1416,16 @@ def raster_apartments(rgb: np.ndarray, labels: list, args, px_per_pt: float, nam
         dist2, (jy, jx) = ndi.distance_transform_edt(owned == 0, return_indices=True)
         near_owner = owned[jy, jx]
         body_colour = [mask_fill_colour(rgb, a.mask & fill) for a in bodies]
+        room_boxes = ndi.find_objects(rooms)
         for members in leftovers:
-            piece = np.isin(rooms, members)
-            cand = near_owner[piece]
-            d = dist2[piece]
+            boxes = [room_boxes[r - 1] for r in members if room_boxes[r - 1] is not None]
+            if not boxes:
+                continue
+            box = tuple(slice(min(b[axis].start for b in boxes),
+                              max(b[axis].stop for b in boxes)) for axis in range(2))
+            piece = np.isin(rooms[box], members)
+            cand = near_owner[box][piece]
+            d = dist2[box][piece]
             cand = cand[d <= attach_px]
             if cand.size == 0:
                 orphans += 1
@@ -1282,15 +1436,14 @@ def raster_apartments(rgb: np.ndarray, labels: list, args, px_per_pt: float, nam
                 continue
             # Близькість — ще не привід: комора чи ліфтовий вузол упритул до
             # квартири зафарбовані своїм кольором, і в квартиру не входять.
-            if not same_fill_colour(mask_fill_colour(rgb, piece & fill),
-                                    body_colour[winner - 1], args.attach_colour):
+            if not same_fill_colour(mask_fill_colour(rgb[box], piece & fill[box]),
+                                    body_colour[winner - 1], min(args.attach_colour, SAME_TINT)):
                 orphans += 1
                 continue
-            bodies[winner - 1].mask = bodies[winner - 1].mask | piece
+            bodies[winner - 1].mask[box] |= piece
 
-    missing = [a.label for a in labels if a.mask is None or not a.mask.any()]
     bodies = [a for a in bodies if a.mask is not None and a.mask.any()]
-    return bodies, missing, orphans, coverage
+    return bodies, unmatched_labels(labels, bodies), orphans, coverage
 
 
 # ======================================================= зонування за кольором
@@ -1632,6 +1785,101 @@ def expand_masks(masks, rgb, dilate_px, snap_area_px, smooth_px,
     return [ndi.binary_fill_holes(
                 ndi.binary_closing(m, structure=square(bite))) & ~alien[i]
             for i, m in enumerate(result)]
+
+
+def refine_room_masks(masks, rgb, scale, wall_pt=5.0):
+    """Local wall envelopes for raster rooms, with solid neighbour interiors.
+
+    Furniture and text are holes in the coloured floor, not outside space.
+    Close drawing strokes before filling those holes. Never use a connected
+    ink component to extend a crop: a wall can connect to the neighbour's bed.
+    """
+    shape = rgb.shape[:2]
+    margin = max(2, int(round(wall_pt * scale)))
+    halo = margin * 5 + 8
+    owned = np.zeros(shape, np.int32)
+    interiors, boxes = [], []
+    stroke = max(1, int(round(scale)))
+    # Наскільки далеко за свою межу дозволено добрати спільну стіну.
+    wall_span = margin * WALL_SPAN
+
+    for i, mask in enumerate(masks, 1):
+        ys, xs = np.nonzero(mask)
+        if not xs.size:
+            interiors.append(None)
+            boxes.append(None)
+            continue
+        box = (slice(max(0, ys.min() - halo), min(shape[0], ys.max() + halo + 1)),
+               slice(max(0, xs.min() - halo), min(shape[1], xs.max() + halo + 1)))
+        body = ndi.binary_fill_holes(ndi.binary_closing(mask[box], structure=disk(stroke)))
+        # Coloured antialiasing on a line is not a room or balcony.
+        components, count = ndi.label(body)
+        sizes = np.bincount(components.ravel())
+        keep = sizes >= max(4, 3 * scale * scale)
+        keep[0] = False
+        body = keep[components]
+        # Furniture can touch the exterior wall, leaving a bay open to the
+        # outside in the floor paint. Bridge bounded gaps along drawing axes;
+        # do not take the bounding rectangle of an L-shaped apartment.
+        bridge = max(3, int(round(min(60 * scale, np.sqrt(body.sum()) * 0.7))))
+        body = (body | ndi.binary_closing(body, structure=np.ones((1, bridge), bool)) |
+                ndi.binary_closing(body, structure=np.ones((bridge, 1), bool)))
+        body = ndi.binary_fill_holes(body)
+        interiors.append(body)
+        boxes.append(box)
+        owned[box][body & (owned[box] == 0)] = i
+    distance, indices = ndi.distance_transform_edt(owned == 0, return_indices=True)
+    nearest = owned[tuple(indices)]
+    del indices
+    result = []
+    for i, (body, box) in enumerate(zip(interiors, boxes), 1):
+        output = np.zeros(shape, bool)
+        if body is None:
+            result.append(output)
+            continue
+        foreign = (owned[box] > 0) & (owned[box] != i)
+        crop = body | ((nearest[box] == i) & (distance[box] <= margin))
+        crop = ndi.binary_fill_holes(crop) & ~foreign
+        ink = ndi.binary_closing(rgb[box].min(2) < 180, structure=disk(stroke))
+        # Closed white furniture/door pockets are absent from the floor paint.
+        # Recover enclosed faces, never whole connected ink (which may be a
+        # wall plus the neighbour's furniture). Ownership is evaluated against
+        # all apartments at once and components touching the ROI are exterior.
+        pockets, count = ndi.label(~ink & (owned[box] == 0))
+        sizes = np.bincount(pockets.ravel())
+        for component, region in enumerate(ndi.find_objects(pockets), 1):
+            if region is None or sizes[component] < 4 * scale * scale:
+                continue
+            height, width = (s.stop - s.start for s in region)
+            if max(height, width) > 90 * scale:
+                continue
+            if any(s.start == 0 or s.stop == body.shape[axis] for axis, s in enumerate(region)):
+                continue
+            piece = pockets[region] == component
+            close = distance[box][region][piece]
+            votes = nearest[box][region][piece]
+            if close.min() > margin * 2 or np.median(close) > margin * 4:
+                continue
+            if np.mean(votes == i) < 0.9:
+                continue
+            crop[region] |= piece
+        crop |= ndi.binary_dilation(crop, structure=disk(stroke)) & ink & ~foreign
+        # Міжквартирна стіна ділиться навпіл по серединній лінії між сусідами:
+        # кожен отримує рівно половину, і зовнішня грань стіни лишається за
+        # кадром - на вирізці видно обрізану навскіс штриховку без замикальної
+        # лінії. Спільну стіну дозволено показати цілком в обох PNG, тож
+        # добираємо саме той шар, що лежить МІЖ моїм і сусідським приміщенням.
+        # Обмеження з обох боків не дає піти ні вздовж стіни через весь дім,
+        # ні назовні по виносних і розмірних лініях біля фасаду.
+        if foreign.any():
+            to_self = ndi.distance_transform_edt(~crop)
+            to_alien = ndi.distance_transform_edt(~foreign)
+            crop |= (ink & ~foreign & (to_self <= wall_span) & (to_alien <= wall_span))
+        crop = add_door_swings(crop, ink, margin * 4, (wall_pt * 8 * scale) ** 2,
+                               foreign | ((nearest[box] != i) & (distance[box] <= margin)))
+        output[box] = crop & ~foreign
+        result.append(output)
+    return result
 
 
 # Наскільки далеко за межу заглядаємо в пошуках відрізаного хвоста, пункти.
@@ -2115,7 +2363,7 @@ def cut_page(page, img_getter, args, tess, page_no=1, name_floor=None, log=print
                     max(int(round(masks[0].shape[0] * k)), 1))
             masks = [np.asarray(Image.fromarray(m).resize(size, Image.NEAREST))
                      for m in masks]
-    if args.sliver > 0:
+    if args.sliver > 0 and mode_used != "raster":
         sliver_px = args.sliver * mask_dpi / 72.0
         masks = [trim_slivers(m, sliver_px) for m in masks]
     mask_rgb = np.asarray(img_getter(mask_dpi).convert("RGB"))
@@ -2123,13 +2371,23 @@ def cut_page(page, img_getter, args, tess, page_no=1, name_floor=None, log=print
         masks = [np.asarray(Image.fromarray(m).resize(
             (mask_rgb.shape[1], mask_rgb.shape[0]), Image.NEAREST)) for m in masks]
     scale = mask_dpi / 72.0
-    masks = expand_masks(masks, mask_rgb, args.dilate * scale,
-                         args.snap_area * scale * scale, args.smooth * scale,
-                         args.snap_span * scale, TAIL_REACH * scale)
+    if mode_used == "raster":
+        masks = refine_room_masks(masks, mask_rgb, scale, min(args.dilate, args.close))
+    else:
+        masks = expand_masks(masks, mask_rgb, args.dilate * scale,
+                             args.snap_area * scale * scale, args.smooth * scale,
+                             args.snap_span * scale, TAIL_REACH * scale)
 
+    # Поверх аркуша важливіший за здогад з імені файлу: в альбомі «2-26 поверх»
+    # ім'я дає 26 для всіх 25 сторінок. Веб-застосунок і так рахує поверх
+    # сторінкою, тож консоль має давати той самий результат.
+    sheet_floor = (args.floor
+                   or (str(page_floor(page)) if page is not None
+                       and page_floor(page) is not None else None)
+                   or name_floor or apts[0].floor or str(page_no))
     info.update({"mode": mode_used, "missing": missing, "orphans": orphans,
                  "labels": len(labels), "mask_dpi": mask_dpi,
-                 "floor": args.floor or name_floor or apts[0].floor or str(page_no)})
+                 "floor": sheet_floor})
     return apts, masks, info
 
 

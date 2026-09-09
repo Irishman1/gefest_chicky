@@ -806,7 +806,7 @@
   }
 
   if (busy) { setTimeout(poll, 1500); }
-  if (root.dataset.status === "done") {
+  if (root.dataset.status === "done" || root.dataset.status === "review") {
     loadHitmap();
     try { renderList(JSON.parse(root.dataset.flats || "[]")); } catch (e) {}
   }

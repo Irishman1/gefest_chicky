@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import cut_apartments as ca  # noqa: E402
+import plan_audit  # noqa: E402
 
 PREVIEW_DPI = 150          # план для просмотра и правки в браузере.
                            # Совпадает с разрешением масок: в окне правки
@@ -306,6 +307,7 @@ def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: in
             say(f"      {apt.label} -> {name}")
 
         Image.fromarray(hit, mode="L").save(out_dir / "hitmap.png", optimize=True)
+        failed_saves = len(apts) - len(records)
 
         # Ручные правки накладываем поверх свежей автонарезки — «порезать
         # заново» не должно стирать то, что человек доделал руками.
@@ -321,8 +323,42 @@ def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: in
             say(f"      осталось непривязанных заливок: {info['orphans']} "
                 "(обычно это легенда)")
 
+        missing = sorted(set(info["missing"]))
+        unnamed = sum(r["label"].startswith("без_номера") for r in records)
+
+        # Правильное число квартир ещё не значит правильные контуры, поэтому
+        # сверяемся с ведомостью самого чертежа и проверяем, не претендуют ли
+        # две квартиры на одно помещение. Это те же проверки, что и в
+        # консольном tools/verify.py: «проверено» должно значить одно и то же.
+        doubts = []
+        try:
+            kept = {r["label"]: m for r, m in zip(records, masks)
+                    if not r["label"].startswith("без_номера")}
+            if kept:
+                mask_rgb = np.asarray(
+                    ca.page_to_image(page, info["mask_dpi"]).convert("RGB"))
+                doubts, _rows = plan_audit.audit(page, kept, info["mask_dpi"],
+                                                 mask_rgb, args.prefix)
+        except Exception as exc:               # noqa: BLE001
+            doubts = [f"проверку по ведомости выполнить не удалось: {exc}"]
+        for line in doubts:
+            say("      ? " + line)
+
+        needs_review = bool(missing or unnamed or failed_saves or doubts)
+        message = f"Нарезано: {what} {len(records)}"
+        if needs_review:
+            reasons = []
+            if missing:
+                reasons.append(f"не найдены: {len(missing)}")
+            if unnamed:
+                reasons.append(f"без номера: {unnamed}")
+            if failed_saves:
+                reasons.append(f"не сохранены: {failed_saves}")
+            if doubts:
+                reasons.append(f"замечаний по геометрии: {len(doubts)}")
+            message += "; требуется проверка (" + ", ".join(reasons) + ")"
         return {"ok": True, "apartments": records, "log": "\n".join(lines),
-                "mode": info["mode"],
-                "message": f"Готово: {what} {len(records)}"}
+                "mode": info["mode"], "needs_review": needs_review,
+                "missing": missing, "doubts": doubts, "message": message}
     finally:
         doc.close()

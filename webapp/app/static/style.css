@@ -335,6 +335,8 @@ button svg, .btn svg { flex: none; }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; }
 .status.done { color: var(--ok); background: var(--ok-tint); border-color: color-mix(in srgb, var(--ok) 26%, transparent); }
 .status.done::before { background: var(--ok); }
+.status.review { color: var(--warn); background: var(--warn-tint); border-color: var(--warn); }
+.status.review::before, .floor.review i { background: var(--warn); }
 .status.error { color: var(--err); background: var(--err-tint); border-color: color-mix(in srgb, var(--err) 26%, transparent); }
 .status.error::before { background: var(--err); }
 .status.queued, .status.working { color: var(--warn); background: var(--warn-tint); border-color: color-mix(in srgb, var(--warn) 26%, transparent); }

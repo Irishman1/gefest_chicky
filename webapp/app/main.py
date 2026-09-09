@@ -352,7 +352,8 @@ def owns_project(row, user) -> bool:
 def projects(request: Request, user=Depends(require_user)):
     rows = db.query(
         "SELECT p.*, "
-        "(SELECT COUNT(*) FROM floors f WHERE f.project_id = p.id AND f.status='done') "
+        "(SELECT COUNT(*) FROM floors f WHERE f.project_id = p.id "
+        " AND f.status IN ('done','review')) "
         "AS ready, "
         "(SELECT COUNT(*) FROM apartments a JOIN floors f ON f.id = a.floor_id "
         " WHERE f.project_id = p.id) AS flats, "

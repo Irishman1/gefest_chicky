@@ -11,6 +11,7 @@ COPY webapp/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY cut_apartments.py ./cut_apartments.py
+COPY plan_audit.py ./plan_audit.py
 COPY webapp/app ./app
 COPY webapp/backup.py ./backup.py
 

@@ -89,7 +89,7 @@
       {% endif %}
     </div>
 
-    {% if floor["status"] == "done" and apartments %}
+    {% if floor["status"] in ("done", "review") and apartments %}
       <p class="lede" style="margin-top:14px">
         Наведите на {{ "офис" if project["kind"] == "offices" else "квартиру" }} — {{ "он подсветится" if project["kind"] == "offices" else "она подсветится" }}. Нажмите, чтобы скачать.
       </p>

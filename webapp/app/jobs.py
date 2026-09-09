@@ -90,8 +90,9 @@ def _run(floor_id: int) -> None:
                 "x0, y0, x1, y1) VALUES (?,?,?,?,?,?,?,?,?)",
                 (floor_id, rec["idx"], rec["label"], rec["number"], rec["filename"],
                  x0, y0, x1, y1))
-        db.execute("UPDATE floors SET status='done', message=?, log=?, updated_at=? "
-                   "WHERE id=?", (result["message"], result["log"], db.now(), floor_id))
+        status = "review" if result.get("needs_review") else "done"
+        db.execute("UPDATE floors SET status=?, message=?, log=?, updated_at=? "
+                   "WHERE id=?", (status, result["message"], result["log"], db.now(), floor_id))
     else:
         db.execute("UPDATE floors SET status='error', message=?, log=?, updated_at=? "
                    "WHERE id=?", (result["message"], result["log"], db.now(), floor_id))
