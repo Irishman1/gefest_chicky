@@ -53,11 +53,13 @@ SAME_TINT = 10.0
 
 # Підпис квартири: "А-12.1", "К-3.15", "A-12,1". Перший символ може не
 # розпізнатись зі шрифту PDF (�) або бути прочитаний OCR як латиниця — не біда.
-# \u0427\u0430\u0441\u0442\u0438\u043d\u0430 \u043f\u0440\u043e\u0454\u043a\u0442\u0456\u0432 \u043f\u0438\u0448\u0435 \u043f\u0456\u0434\u043f\u0438\u0441 \u0431\u0435\u0437 \u0434\u0435\u0444\u0456\u0441\u0430: "\u04103.9", "\u041a 3.1". \u0422\u043e\u043c\u0443 \u0434\u0435\u0444\u0456\u0441
-# \u043d\u0435\u043e\u0431\u043e\u0432'\u044f\u0437\u043a\u043e\u0432\u0438\u0439, \u0430\u043b\u0435 \u0431\u0435\u0437 \u043d\u044c\u043e\u0433\u043e \u043b\u0456\u0442\u0435\u0440\u0430 \u043e\u0431\u043e\u0432'\u044f\u0437\u043a\u043e\u0432\u0430 \u2014 \u0456\u043d\u0430\u043a\u0448\u0435 \u043f\u0456\u0434 \u0448\u0430\u0431\u043b\u043e\u043d
-# \u043f\u043e\u043b\u0456\u0437\u0443\u0442\u044c \u043f\u043b\u043e\u0449\u0456 ("46,46").
+# Частина проєктів пише підпис без дефіса: "А3.9", "К 3.1". Тому дефіс
+# необов'язковий, але без нього літера обов'язкова — інакше під шаблон
+# полізуть площі ("46,46"). Інші пишуть його через крапку: "А.3.9" — так само
+# без дефіса, тільки крапка розділяє й літеру, і поверх, і номер.
 LABEL_RE = re.compile(
     r"^\s*(?:(?P<dashed>[^\s\-\u2013\u2014]{0,3})\s*[\-\u2013\u2014]\s*"
+    r"|(?P<dotted>[^\W\d_]{1,2})\s*\.\s*"
     r"|(?P<plain>[^\W\d_]{1,2})\s*)"
     r"(?P<floor>\d{1,3})[.,](?P<num>\d{1,3})\s*$")
 # Some plans label an apartment as bare "24.1" (no letter, no dash) - the same
@@ -130,7 +132,7 @@ def parse_label(text, prefix):
     m = LABEL_RE.match(text)
     if not m:
         return None
-    letter = m.group("dashed") or m.group("plain") or ""
+    letter = m.group("dashed") or m.group("dotted") or m.group("plain") or ""
     floor, num = m.group("floor"), m.group("num")
     letter = "".join(ch for ch in letter if ch.isalnum() and ch != "\ufffd")
     if not letter or letter.isdigit():
@@ -667,7 +669,13 @@ def find_text_labels(page, prefix):
             a.via_leader = True         # позначка для зонального розбору
         trusted.extend(from_leaders)
 
-    if not bare:
+    # "Голий" підпис ("24.1", без букви) - запасний варіант рівно для планів,
+    # де іншого формату немає взагалі. Коли дефісний чи крапковий формат уже
+    # впізнано, довіряти йому надійніше: голий підпис невідрізний від площі
+    # ("46,46"), і на аркуші зі зведеною таблицею квартир поруч із планом
+    # (де ті самі числа повторюються без букви) ця евристика захлинається
+    # підсумковими цифрами таблиці, перетворюючи їх на неіснуючі квартири.
+    if not bare or trusted:
         return trusted
 
     counts = {}
@@ -753,7 +761,7 @@ def vector_apartments(page, labels, args):
     # відносно того, що квартирі реально належить від початку.
     own_area = {id(a): sum(pp["rect"].get_area() for pp in a.paths) for a in bodies}
     added_area = {id(a): 0.0 for a in bodies}
-    area_cap = 2.0
+    area_cap = args.room_cap
 
     # Колір — перевага, а не заборона.
     #
@@ -801,7 +809,12 @@ def vector_apartments(page, labels, args):
 
     for a in bodies:
         a.rect = union_rect(a.paths)
-    missing = [a.label for a in labels if not a.paths]
+    # Той самий підпис інколи трапляється на аркуші двічі - ще й у зведеній
+    # таблиці квартир поряд із планом. Друга згадка ніколи не влучає в
+    # заливку і сама по собі виглядала б як "квартиру не знайдено", хоча
+    # перша, на плані, уже зібрана в bodies.
+    found = {a.label for a in bodies}
+    missing = [a.label for a in labels if not a.paths and a.label not in found]
     return bodies, missing, orphans, len(fills), len(legend)
 
 
@@ -2223,6 +2236,11 @@ def build_parser():
                          "лишається спільною")
     ap.add_argument("--attach-gap", type=float, default=25.0,
                     help="макс. відстань (пункти), на якій балкон вважається частиною квартири")
+    ap.add_argument("--room-cap", type=float, default=2.0,
+                    help="vector: у скільки разів квартира може вирости від площі "
+                         "заливки, на якій стоїть підпис; збільшіть, якщо квартиру "
+                         "намальовано десятками окремих кімнатних заливок і підпис "
+                         "стоїть на маленькій з них (коридор, санвузол)")
     ap.add_argument("--zone-bridge", type=float, default=2.5,
                     help="радіус (пункти), яким замикаються тонкі обводки меблів "
                          "усередині кольорової зони (режим планів із виносками «№N»)")
