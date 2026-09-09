@@ -114,7 +114,8 @@ webapp/
     main.py         — маршруты FastAPI
     db.py           — SQLite, схема
     security.py     — пароли, сессии, приглашения
-    cutter.py       — обёртка над ../cut_apartments.py под сайт
+    cutter.py       — обёртка над ../cut_apartments.py под сайт;
+                      сверяет результат через ../plan_audit.py
     jobs.py         — фоновая очередь нарезки
     storage.py      — пути к файлам на диске
     backup_util.py  — бэкап/восстановление

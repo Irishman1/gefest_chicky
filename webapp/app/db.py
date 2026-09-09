@@ -52,7 +52,10 @@ CREATE TABLE IF NOT EXISTS floors (
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     number     INTEGER NOT NULL,
     pdf_name   TEXT,
-    status     TEXT NOT NULL DEFAULT 'empty',   -- empty|queued|working|done|error
+    status     TEXT NOT NULL DEFAULT 'empty',   -- empty|queued|working|done|review|error
+                                              -- review: нарезано, но есть
+                                              -- замечания; смотреть и править
+                                              -- можно так же, как done
     message    TEXT,
     log        TEXT,
     updated_at INTEGER NOT NULL,
