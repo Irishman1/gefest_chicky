@@ -1068,15 +1068,20 @@ def room_fill_colours(rooms, n, rgb, ink=None):
     """
     if ink is None:
         ink = rgb.min(2) < INK_LEVEL
-    clean = np.where(ndi.binary_dilation(ink, structure=disk(2)), 0, rooms)
-    ids = np.arange(1, n + 1)
-    pure_n = np.bincount(clean.ravel(), minlength=n + 1)[1:]
+    # Рахуємо за стиснутим списком чистих пікселів, а не за копією всієї карти
+    # кімнат: на аркуші A1 така копія — зайва сотня мегабайт, а цього досить,
+    # щоб контейнер з обмеженою пам'яттю вбив нарізку.
+    clean = (rooms > 0) & ~ndi.binary_dilation(ink, structure=disk(2))
+    index = rooms[clean]
+    pure_n = np.bincount(index, minlength=n + 1)[1:]
     whole_n = np.maximum(np.bincount(rooms.ravel(), minlength=n + 1)[1:], 1)
     enough = pure_n >= MIN_CLEAN_PX
+    ids = np.arange(1, n + 1)
     colours = np.zeros((n + 1, 3))
     for channel in range(3):
         band = rgb[:, :, channel]
-        pure = ndi.sum(band, clean, ids) / np.maximum(pure_n, 1)
+        pure = np.bincount(index, weights=band[clean],
+                           minlength=n + 1)[1:] / np.maximum(pure_n, 1)
         whole = ndi.sum(band, rooms, ids) / whole_n
         colours[1:, channel] = np.where(enough, pure, whole)
     return colours
@@ -1872,9 +1877,13 @@ def refine_room_masks(masks, rgb, scale, wall_pt=5.0):
         # Обмеження з обох боків не дає піти ні вздовж стіни через весь дім,
         # ні назовні по виносних і розмірних лініях біля фасаду.
         if foreign.any():
+            # Дальня половина стіни — та, де найближче приміщення вже чуже:
+            # це видно зі спільної карти власників, окремо міряти відстань до
+            # сусіда не треба. Ззовні фасаду сусіда немає, тож виносні й
+            # розмірні лінії сюди не потрапляють.
+            far_half = (nearest[box] != i) & (distance[box] <= wall_span)
             to_self = ndi.distance_transform_edt(~crop)
-            to_alien = ndi.distance_transform_edt(~foreign)
-            crop |= (ink & ~foreign & (to_self <= wall_span) & (to_alien <= wall_span))
+            crop |= ink & ~foreign & far_half & (to_self <= wall_span)
         crop = add_door_swings(crop, ink, margin * 4, (wall_pt * 8 * scale) ** 2,
                                foreign | ((nearest[box] != i) & (distance[box] <= margin)))
         output[box] = crop & ~foreign

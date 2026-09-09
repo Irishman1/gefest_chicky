@@ -176,8 +176,19 @@ def loggia_bonus(page, masks, mask_dpi):
 
 
 
-def audit(page, masks, mask_dpi, rgb=None, prefix="А", tolerance=AREA_TOLERANCE):
+def audit(page, masks, mask_dpi, rgb=None, prefix="А", tolerance=AREA_TOLERANCE,
+          present=None, ignore=None):
     """Звіряє нарізку з аркушем. Повертає (проблеми, рядки звіту).
+
+    `masks` — те, чию геометрію можна перевіряти, тобто автоматична нарізка.
+    `present` — повний перелік виданих квартир, включно з поправленими вручну;
+    за ним звіряється склад. Розділяти їх обов'язково: квартиру, домальовану
+    людиною, не можна вічно числити пропущеною, а її контур не описано
+    відомістю й міряти його як автоматичний не можна.
+
+    `ignore` — підписи, яких людина свідомо торкнулась (видалила, перейменувала,
+    домалювала). За складом їх не звіряємо взагалі: навмисне видалення — це
+    рішення користувача, а не втрачена квартира.
 
     Порожній список проблем не означає «ідеально»: він означає, що ці
     перевірки не знайшли розбіжностей. Відсутність відомості на аркуші — не
@@ -185,10 +196,12 @@ def audit(page, masks, mask_dpi, rgb=None, prefix="А", tolerance=AREA_TOLERANCE
     """
     problems, rows = [], []
     table = schedule(page, prefix) if page is not None else {}
+    delivered = set(masks if present is None else present)
+    skip = set(ignore or ())
 
     if table:
-        absent = sorted(set(table) - set(masks))
-        surplus = sorted(set(masks) - set(table))
+        absent = sorted(set(table) - delivered - skip)
+        surplus = sorted(delivered - set(table) - skip)
         if absent:
             problems.append("у відомості є, а в нарізці немає: " + ", ".join(absent))
         if surplus:

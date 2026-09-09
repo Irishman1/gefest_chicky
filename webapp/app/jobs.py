@@ -15,7 +15,7 @@ from .storage import floor_dir
 
 log = logging.getLogger("cutter")
 _queue: "queue.Queue[int]" = queue.Queue()
-_started = False
+_worker_thread: threading.Thread | None = None
 _lock = threading.Lock()
 
 
@@ -27,23 +27,45 @@ def enqueue(floor_id: int) -> None:
 
 
 def start_worker() -> None:
-    global _started
+    """Поднимает воркер, если его нет или он больше не жив.
+
+    Раньше здесь стоял флаг «уже запускали». Если поток по любой причине
+    умирал, флаг оставался поднятым, и новый воркер не запускался уже никогда:
+    все следующие этажи навсегда оставались «В очереди», а страница крутила
+    загрузку. Живость потока — единственный надёжный признак.
+    """
+    global _worker_thread
     with _lock:
-        if _started:
+        if _worker_thread is not None and _worker_thread.is_alive():
             return
-        _started = True
-        threading.Thread(target=_worker, name="cutter", daemon=True).start()
+        _worker_thread = threading.Thread(target=_worker, name="cutter",
+                                          daemon=True)
+        _worker_thread.start()
 
 
 def requeue_pending() -> None:
-    """После перезапуска сервиса добираем то, что осталось в очереди."""
-    for row in db.query("SELECT id FROM floors WHERE status IN ('queued','working')"):
+    """После перезапуска сервиса добираем то, что осталось в очереди.
+
+    Этаж со статусом 'working' резался в момент остановки контейнера — его
+    надо начать заново, а не считать готовым.
+    """
+    rows = db.query("SELECT id FROM floors WHERE status IN ('queued','working')")
+    for row in rows:
+        db.execute("UPDATE floors SET status='queued', message='В очереди', "
+                   "updated_at=? WHERE id=?", (db.now(), row["id"]))
         _queue.put(row["id"])
-    if _queue.qsize():
+    if rows:
+        log.info("После перезапуска возвращено в очередь этажей: %s", len(rows))
         start_worker()
 
 
 def _worker() -> None:
+    """Крутится, пока жив процесс. Из этого цикла нельзя выпасть.
+
+    Ошибка при записи самой ошибки в базу (например, заблокированный SQLite)
+    раньше пробивала except наружу, поток тихо умирал, и очередь вставала
+    навсегда. Поэтому наружу не выпускаем ничего.
+    """
     while True:
         floor_id = _queue.get()
         try:
@@ -51,10 +73,17 @@ def _worker() -> None:
         except Exception:                                  # noqa: BLE001
             err = traceback.format_exc(limit=3)
             log.exception("Ошибка нарезки этажа %s", floor_id)
-            db.execute("UPDATE floors SET status='error', message=?, log=?, updated_at=? "
-                       "WHERE id=?", ("Ошибка обработки", err, db.now(), floor_id))
+            try:
+                db.execute("UPDATE floors SET status='error', message=?, log=?, "
+                           "updated_at=? WHERE id=?",
+                           ("Ошибка обработки", err, db.now(), floor_id))
+            except Exception:                              # noqa: BLE001
+                log.exception("Не удалось записать ошибку этажа %s", floor_id)
         finally:
-            _queue.task_done()
+            try:
+                _queue.task_done()
+            except Exception:                              # noqa: BLE001
+                log.exception("task_done для этажа %s", floor_id)
 
 
 def _run(floor_id: int) -> None:

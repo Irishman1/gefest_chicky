@@ -309,8 +309,15 @@ def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: in
         Image.fromarray(hit, mode="L").save(out_dir / "hitmap.png", optimize=True)
         failed_saves = len(apts) - len(records)
 
+        # Карту «подпись -> маска» снимаем до правок и по idx автонарезки:
+        # после apply_edits состав и порядок records уже другие, и zip() свёл
+        # бы чужую подпись с чужой маской.
+        auto_masks = {r["label"]: masks[r["idx"] - 1] for r in records
+                      if 0 < r["idx"] <= len(masks)}
+
         # Ручные правки накладываем поверх свежей автонарезки — «порезать
         # заново» не должно стирать то, что человек доделал руками.
+        before_edits = {r["label"] for r in records}
         if edits:
             records = apply_edits(pdf_path, out_dir, project_name, floor_number,
                                   records, edits, dpi=dpi, bg=bg,
@@ -332,13 +339,27 @@ def cut_floor(pdf_path: Path, out_dir: Path, project_name: str, floor_number: in
         # консольном tools/verify.py: «проверено» должно значить одно и то же.
         doubts = []
         try:
-            kept = {r["label"]: m for r, m in zip(records, masks)
-                    if not r["label"].startswith("без_номера")}
-            if kept:
+            # Геометрию меряем только там, где её строил алгоритм: обведённый
+            # человеком контур ведомостью не описан, и мерить его как
+            # автоматический нельзя. Состав же сверяем по всему, что выдано,
+            # иначе дорисованная вручную квартира вечно числилась бы
+            # пропущенной, а удалённая — лишней.
+            manual = {r["label"] for r in records if r.get("manual")}
+            delivered = {r["label"] for r in records}
+            # Подписи, которых человек коснулся руками: удалил, переименовал
+            # или дорисовал. Это его решение, а не потеря или лишний файл.
+            touched = (before_edits ^ delivered) | manual
+            checked = {k: m for k, m in auto_masks.items()
+                       if k in delivered and k not in manual
+                       and not k.startswith("без_номера")}
+            if checked:
                 mask_rgb = np.asarray(
                     ca.page_to_image(page, info["mask_dpi"]).convert("RGB"))
-                doubts, _rows = plan_audit.audit(page, kept, info["mask_dpi"],
-                                                 mask_rgb, args.prefix)
+                doubts, _rows = plan_audit.audit(
+                    page, checked, info["mask_dpi"], mask_rgb, args.prefix,
+                    present=delivered - {l for l in delivered
+                                         if l.startswith("без_номера")},
+                    ignore=touched)
         except Exception as exc:               # noqa: BLE001
             doubts = [f"проверку по ведомости выполнить не удалось: {exc}"]
         for line in doubts:
