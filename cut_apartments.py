@@ -1453,8 +1453,15 @@ def add_door_swings(mask, ink_solid, reach_px, max_area_px, taken=None):
     """
     reach = max(int(reach_px), 1)
     zone = ndi.binary_dilation(mask, structure=square(3), iterations=reach)
-    closed = ndi.binary_fill_holes(mask | (ink_solid & zone))
-    cand = closed & ~mask
+    before = mask | (ink_solid & zone)
+    closed = ndi.binary_fill_holes(before)
+    # Саме дірки, які закриття щойно залатало, — це відкрита підлога під
+    # дугою: обмежена дверима й стіною з усіх боків. Не всі стіни й хатчинг у
+    # зоні пошуку — інколи поруч лежить порожній коридор чи чужі двері, і
+    # тоді там немає жодної замкненої кишені, а є лише шматок оздоблення
+    # порога чи кут сусіднього приміщення. Такий шматок не замкнений з усіх
+    # боків, тож у діру не перетворюється і в кадр не потрапляє.
+    cand = closed & ~before
     if taken is not None:
         cand &= ~taken
     if not cand.any():
